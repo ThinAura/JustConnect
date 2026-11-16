@@ -27,7 +27,7 @@ private:
     void retranslate();
     void updateRoutingFields();
     QFormLayout *form;
-    QLabel *warning, *nodeWarning, *rulesHelp, *domainDnsLabel, *caLabel, *clashHelp, *clashTargetsLabel;
+    QLabel *warning, *nodeWarning, *rulesHelp, *domainDnsLabel, *caLabel, *clashHelp, *clashTargetsLabel, *routingWarning;
     QLineEdit *address;
     QSpinBox *port, *socksPort;
     QComboBox *routingMode;

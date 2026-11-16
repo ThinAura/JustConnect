@@ -13,6 +13,9 @@
 #include <QVBoxLayout>
 #include "application/defaultsettings.h"
 #include "core/connectionoptions.h"
+#if defined(Q_OS_LINUX)
+#include "infrastructure/networkhelper/linux/networkhelperavailability.h"
+#endif
 
 ServerSettingsWidget::ServerSettingsWidget(QWidget *parent) : QWidget(parent) {
     auto *layout = new QVBoxLayout(this);
@@ -64,6 +67,12 @@ ServerSettingsWidget::ServerSettingsWidget(QWidget *parent) : QWidget(parent) {
         form->addRow(label,field);
     }
     layout->addLayout(form);
+    routingWarning=new QLabel(this);
+    routingWarning->setObjectName("routingModeWarningLabel");
+    routingWarning->setWordWrap(true);
+    routingWarning->setProperty("warning",true);
+    routingWarning->hide();
+    layout->addWidget(routingWarning);
     clashTargetsLabel=new QLabel(this);
     clashTargets=new QPlainTextEdit(this);
     clashTargets->setObjectName("clashTargetsEdit");
@@ -109,6 +118,11 @@ void ServerSettingsWidget::updateRoutingFields() {
     clashHelp->setVisible(local);
     clashTargetsLabel->setVisible(local);
     clashTargets->setVisible(local);
+#if defined(Q_OS_LINUX)
+    // Automatic routing asks polkit for administrator authorization; surface
+    // whatever this host is missing before the user reaches connect.
+    routingWarning->setVisible(!local);
+#endif
     QString help=tr("Choose how JustConnect looks up specific domains. Use one domain per line, optionally followed by a DNS server's IPv4 address. With no server specified, JustConnect uses gateway DNS.");
 #ifndef Q_OS_WIN
     if (!local) help+=" "+tr("In Automatic routing, use the local proxy for domains the gateway does not publish.");
@@ -125,6 +139,16 @@ void ServerSettingsWidget::retranslate() {
     qobject_cast<QLabel *>(form->labelForField(routingMode))->setText(tr("Routing mode"));
     routingMode->setItemText(0,tr("Automatic routing"));
     routingMode->setItemText(1,tr("Local proxy only"));
+#if defined(Q_OS_LINUX)
+    const auto availability = linuxNetworkHelperAvailability();
+    if (availability.available)
+        routingWarning->setText(tr("Connecting with automatic routing asks for administrator authorization (polkit password) once per application start."));
+    else {
+        const auto detail = availability.helperDetail.isEmpty() ? availability.routingDetail : availability.helperDetail;
+        routingWarning->setText((availability.remedy.isEmpty() ? detail : detail + QChar('\n') + availability.remedy)
+            + QChar('\n') + tr("Choose “Local proxy only”, then connect to use the local SOCKS5/HTTP proxy."));
+    }
+#endif
     qobject_cast<QLabel *>(form->labelForField(socksPort))->setText(tr("Local SOCKS5 port"));
     socksPort->setSpecialValueText(tr("Off"));
     clashHelp->setText(tr("Once connected, choose Copy Clash Extend Script from the connection menu."));

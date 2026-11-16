@@ -35,8 +35,14 @@ protected:
     void showEvent(QShowEvent *) override;
     void hideEvent(QHideEvent *) override;
     void focusInEvent(QFocusEvent *) override;
+#ifdef Q_OS_LINUX
+    bool eventFilter(QObject *, QEvent *) override;
+#endif
 
 private:
+#ifdef Q_OS_LINUX
+    void installKeyboardFilter();
+#endif
     struct Native;
     std::unique_ptr<Native> native;
 };

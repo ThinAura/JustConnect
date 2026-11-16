@@ -53,6 +53,7 @@ ConnectionDiagnostics::ConnectionDiagnostics(CoreEngine *core, ConnectionSession
                                          "local_controller_real_dns",      "local_controller_ambiguous",
                                          "local_controller_unavailable",   "coexistence_refresh_failed",
                                          "socks_dns_failed", "socks_destination_denied", "socks_tunnel_node_unreachable", "socks_campus_dial_failed",
+                                         "campus_dns_unreachable", "campus_dns_unconfigured", "l3_dns_destination_unauthorized",
                                          "tls_node_verification_disabled", "tls_verification_disabled",
                                          "tls_authentication_failed",      "persistence_failed",
                                          "browser_proxy_changed_externally", "browser_proxy_observation_unavailable",

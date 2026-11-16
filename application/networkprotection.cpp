@@ -214,6 +214,23 @@ std::optional<QJsonArray> originalDnsNamespaces(const QJsonObject &dns)
                 {{"provider", "dynamic_store"}, {"key", it.key()}, {"field", "DomainName"}})) return std::nullopt;
         }
     }
+    if (dns.contains("resolv_conf")) {
+        if (!dns["resolv_conf"].isObject()) return std::nullopt;
+        const auto conf = dns["resolv_conf"].toObject();
+        const auto strings = [&conf](const QString &field) {
+            if (!conf.contains(field)) return true;
+            if (!conf[field].isArray()) return false;
+            for (const auto &value : conf[field].toArray()) if (!value.isString()) return false;
+            return true;
+        };
+        if (!strings("nameservers") || !strings("search")
+            || (conf.contains("domain") && !conf["domain"].isString())) return std::nullopt;
+        const QJsonObject source{{"provider", "resolv_conf"}};
+        // Nameserver addresses are not name namespaces; the search list and domain carry resolver scope.
+        if (!list(conf, "search", "search", source)) return std::nullopt;
+        if (conf.contains("domain") && !conf["domain"].toString().isEmpty()
+            && !add(conf["domain"], "search", {{"provider", "resolv_conf"}, {"field", "domain"}})) return std::nullopt;
+    }
     if (dns.contains("macos_resolvers")) {
         if (!dns["macos_resolvers"].isArray()) return std::nullopt;
         const auto resolvers = dns["macos_resolvers"].toArray();

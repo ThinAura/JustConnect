@@ -34,6 +34,10 @@ int main(int argc, char *argv[])
         if (output.write(bytes) != bytes.size() || !output.flush()) return 1;
         return report["ok"].toBool() ? 0 : 1;
     }
+#if defined(Q_OS_LINUX)
+    // QtWebEngine renders in a separate Chromium process and needs a shared GL context group.
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+#endif
     QApplication app(argc, argv);
     QApplication::setApplicationName(ApplicationConstants::ApplicationName);
     QApplication::setApplicationDisplayName(ApplicationConstants::ApplicationName);

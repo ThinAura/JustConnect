@@ -9,9 +9,11 @@
 #include <windows.h>
 #include <QHostAddress>
 #endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_LINUX)
 #if defined(Q_OS_MACOS)
 #include "infrastructure/networkhelper/macos/networkhelperclient.h"
 #include "macos_listener.h"
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -544,7 +546,7 @@ void EmbeddedCoreEngine::prepareOriginalDNS(const QString &generation, const QJs
 }
 void EmbeddedCoreEngine::attachTUN(const QString &generation, qint32 descriptor, quint32 mtu, bool publishDNSRoutes) {
     if (!active || stopping) { emit tunAttached(generation, RequestStatus::Stale); return; }
-#if defined(Q_OS_MACOS)
+#if defined(Q_OS_MACOS) || defined(Q_OS_LINUX)
     if (!library().jc_session_attach_tun || !buildInfo()["capabilities"].toObject()["raw_ipv4_tun_fd"].toBool()
         || (publishDNSRoutes && (!library().jc_session_attach_tun_dns || !library().jc_session_ack_dns_routes
             || !buildInfo()["capabilities"].toObject()["tun_dns_routes"].toBool()))) {
