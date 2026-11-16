@@ -9,7 +9,7 @@
 #include <stdexcept>
 #if defined(Q_OS_MACOS)
 #include "infrastructure/credentialstore/macos/credentialstore.h"
-#else
+#elif defined(Q_OS_WIN)
 #include <windows.h>
 #endif
 
@@ -128,7 +128,7 @@ int main(int argc,char **argv) {
             require(label && CFEqual(label,CFSTR("JustConnect Saved Data")),"Keychain item label describes JustConnect data");
             require(SecKeychainLock(keychain)==errSecSuccess,"lock isolated keychain");locked(*store,a);
             require(SecKeychainUnlock(keychain,UInt32(password.size()),password.constData(),true)==errSecSuccess,"unlock isolated keychain");
-#else
+#elif defined(Q_OS_WIN)
             require(ImpersonateAnonymousToken(GetCurrentThread()),"anonymous logon boundary");
             {
                 const auto revert=qScopeGuard([]{RevertToSelf();});
@@ -138,6 +138,9 @@ int main(int argc,char **argv) {
                 ProxyRecoveryJournal journal(*store,proxyKey(a));
                 const auto record=journal.load();require(inaccessible(record.status) && record.value.isEmpty(),"anonymous logon accessed proxy recovery material");
             }
+#else
+            // Linux: prepare and finish already exercised the active provider end to end; the
+            // session-keyring access boundary is covered by the manual locked and denied modes.
 #endif
             finish(*store,a,b);
         }

@@ -54,7 +54,14 @@ int main(int argc,char **argv) {
     }
     check(mode->currentIndex()==0 && mode->y()>port->y() && mode->y()<verify->y()
         && localPort->isHidden() && extraRoutes->isHidden(),"mode is near the top and only local mode shows proxy fields");
+    auto *routingWarning=editor.findChild<QLabel *>("routingModeWarningLabel");
+    check(routingWarning && routingWarning->isVisibleTo(&editor) && !routingWarning->text().isEmpty(),
+        "automatic routing explains its authorization or the missing host setup");
+    if (routingWarning->text().contains("not installed as a root-owned"))
+        check(routingWarning->text().contains("sudo chown root:root") && routingWarning->text().contains("sudo chmod 0755"),
+            "a missing helper names its exact repair commands");
     mode->setCurrentIndex(1);
+    check(routingWarning->isHidden(),"local proxy mode hides the automatic routing notice");
     localPort->setValue(32081);
     extraRoutes->setPlainText("192.0.2.18:22");
     auto local=SavedConnectionService::load(editor.settingsValues());

@@ -249,6 +249,145 @@ class VerifyPackageTest(unittest.TestCase):
                         package.check_signin_browser(root, probe, probe, {})
             self.assertEqual(list(root.glob('*.exe')), [probe])
 
+    def test_linux_browser_probe_runs_with_the_bundled_runtime(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            executable = root / 'bin' / 'JustConnect'
+            executable.parent.mkdir()
+            executable.touch()
+            probe = Path(folder) / 'source-probe'
+            probe.write_bytes(b'probe fixture')
+            def run(*args, **kwargs):
+                self.assertEqual(Path(args[0]).parent, executable.parent)
+                self.assertEqual(Path(args[0]).read_bytes(), probe.read_bytes())
+                self.assertNotEqual(Path(kwargs['cwd']), executable.parent)
+                env = kwargs['env']
+                self.assertEqual(env['QT_QPA_PLATFORM'], 'offscreen')
+                self.assertEqual(env['QTWEBENGINE_CHROMIUM_FLAGS'],
+                                 '--no-sandbox --disable-gpu --disable-dev-shm-usage')
+                self.assertNotIn('QT_QPA_PLATFORM_PLUGIN_PATH', env)
+                return ''
+            with patch.object(package.sys, 'platform', 'linux'), patch.object(package, 'run', side_effect=run):
+                self.assertEqual(package.check_signin_browser(root, executable, probe, {}), 'QtWebEngine')
+            self.assertEqual(list(executable.parent.glob('signin-browser-check-*')), [])
+
+    def test_linux_audit_requires_relocatable_bundled_qt_and_webengine(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for path in ('bin/JustConnect', 'bin/qt.conf', 'lib/libQt6Core.so.6', 'libexec/QtWebEngineProcess',
+                         'resources/icudtl.dat', 'resources/qtwebengine_resources.pak',
+                         'translations/qtwebengine_locales/en.pak'):
+                destination = root / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.touch()
+            (root / 'bin/qt.conf').write_text('[Paths]\nPrefix = ..\nPlugins = plugins\n'
+                                              'LibExecs = libexec\nData = .\nTranslations = translations\n')
+            files = [root / 'bin/JustConnect', root / 'lib/libQt6Core.so.6']
+            needed = {root / 'bin/JustConnect': 'libQt6Core.so.6 libc.so.6',
+                      root / 'lib/libQt6Core.so.6': 'libc.so.6'}
+            runpath = {root / 'bin/JustConnect': '$ORIGIN/../lib', root / 'lib/libQt6Core.so.6': '$ORIGIN'}
+            def attempt(**overrides):
+                machine = overrides.get('machine', 'Advanced Micro Devices X86-64')
+                patched_needed = {**needed, **overrides.get('needed', {})}
+                patched_runpath = {**runpath, **overrides.get('runpath', {})}
+                legacy_rpath = overrides.get('legacy_rpath', False)
+                ldd = overrides.get('ldd', 'libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0)\n')
+                def run(*args, **kwargs):
+                    if args[0] == 'readelf':
+                        path = Path(args[2])
+                        if args[1] == '--file-header':
+                            return 'Machine: ' + machine
+                        tag = 'RPATH' if legacy_rpath else 'RUNPATH'
+                        return ''.join(f' 0x1 (NEEDED) Shared library: [{name}]\n'
+                                       for name in patched_needed[path].split()) \
+                               + f' 0x1d ({tag}) Library runpath: [{patched_runpath[path]}]\n'
+                    return ldd
+                with patch.object(package, 'run', side_effect=run):
+                    return package.linux_audit(files, root, overrides.get('arch', 'amd64'), {})
+            audit = attempt()
+            self.assertEqual(audit['files'][0]['dependencies'],
+                             {'libQt6Core.so.6': 'lib/libQt6Core.so.6', 'libc.so.6': 'Linux system library'})
+            self.assertEqual(audit['qtwebengine'], {'process': 'libexec/QtWebEngineProcess', 'resources': 'resources',
+                                                    'locales': 'translations/qtwebengine_locales'})
+            with self.subTest(case='wrong architecture'):
+                with self.assertRaisesRegex(RuntimeError, 'Wrong ELF architecture'):
+                    attempt(arch='arm64')
+            with self.subTest(case='unbundled Qt dependency'):
+                with self.assertRaisesRegex(RuntimeError, 'Unbundled Qt dependency'):
+                    attempt(needed={root / 'bin/JustConnect': 'libQt6Core.so.6 libQt6Gui.so.6 libc.so.6'})
+            with self.subTest(case='absolute search path'):
+                with self.assertRaisesRegex(RuntimeError, 'Non-relocatable ELF search path'):
+                    attempt(runpath={root / 'bin/JustConnect': '/opt/Qt/lib'})
+            with self.subTest(case='legacy DT_RPATH'):
+                with self.assertRaisesRegex(RuntimeError, 'Legacy DT_RPATH entry'):
+                    attempt(legacy_rpath=True)
+            with self.subTest(case='unresolved dependency'):
+                with self.assertRaisesRegex(RuntimeError, 'Unresolved ELF dependencies'):
+                    attempt(ldd='libQt6Core.so.6 not found\n')
+            with self.subTest(case='missing webengine component'):
+                icudtl = root / 'resources/icudtl.dat'
+                icudtl.unlink()
+                try:
+                    with self.assertRaisesRegex(RuntimeError, 'Missing QtWebEngine runtime component'):
+                        attempt()
+                finally:
+                    icudtl.touch()
+            with self.subTest(case='qt.conf missing a search path'):
+                qt_conf = root / 'bin/qt.conf'
+                complete = qt_conf.read_text()
+                qt_conf.write_text(complete.replace('Translations = translations\n', ''))
+                try:
+                    with self.assertRaisesRegex(RuntimeError, 'does not declare its Translations'):
+                        attempt()
+                finally:
+                    qt_conf.write_text(complete)
+
+    def test_linux_package_bundles_qtwebengine_while_other_platforms_still_reject_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            host = root / 'bin' / 'JustConnect'
+            host.parent.mkdir()
+            host.touch()
+            worker = root / 'bin' / 'JustConnectProxyRecovery'
+            worker.touch()
+            (root / 'source-revision.txt').write_text('revision')
+            (root / 'core-toolchain.txt').write_text('CGO_ENABLED=1')
+            notices = root / 'licenses'
+            notices.mkdir()
+            for name in ('LICENSE', 'LICENSE.ping', 'LICENSE.lucide', 'ThirdPartyNotices.txt'):
+                (notices / name).touch()
+            webengine = root / 'lib' / 'libQt6WebEngineCore.so.6'
+            webengine.parent.mkdir()
+            webengine.write_bytes(b'\x7fELF-fixture')
+            archive = root / 'package.tar.gz'
+            archive.write_bytes(b'archive fixture')
+            output = root / 'report.json'
+            def self_test(*args, **kwargs):
+                return SimpleNamespace(returncode=0, stdout=json.dumps({'runtime': 'static'}).encode())
+            with patch.object(package.subprocess, 'run', side_effect=self_test), \
+                    patch.object(package, 'validate_report'), \
+                    patch.object(package, 'check_proxy_recovery', return_value={}), \
+                    patch.object(package, 'check_signin_browser', return_value='QtWebEngine'), \
+                    patch.object(package, 'linux_audit', return_value={}) as audit, \
+                    patch.object(package, 'check_linux_network_helper', return_value={}) as helper_check, \
+                    patch.object(package.platform, 'machine', return_value='x86_64'), \
+                    patch.object(package.sys, 'platform', 'linux'):
+                package.verify(root, host, 'revision', 'preview', output, archive)
+                audit.assert_called_once()
+                self.assertEqual(audit.call_args[0][0], [webengine])
+                self.assertEqual(helper_check.call_count, 1)
+                output.unlink()
+                icudtl = root / 'resources' / 'icudtl.dat'
+                icudtl.parent.mkdir()
+                icudtl.touch()
+                package.verify(root, host, 'revision', 'preview', output, archive)
+                icudtl.unlink()
+                output.unlink()
+                with patch.object(package.sys, 'platform', 'darwin'), \
+                        patch.object(package, 'macos_audit', return_value={}):
+                    with self.assertRaisesRegex(RuntimeError, 'Obsolete bundled browser'):
+                        package.verify(root, host, 'revision', 'preview', output, archive)
+
     def test_macos_browser_probe_does_not_write_the_mounted_bundle(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder) / 'JustConnect.app'
@@ -417,6 +556,143 @@ class VerifyPackageTest(unittest.TestCase):
             manifest.write_bytes(plistlib.dumps(dict(launch, Program='/bin/sh')))
             with self.assertRaisesRegex(RuntimeError, 'fixed privilege contract'):
                 package.check_macos_network_helper(root, {})
+
+    def test_linux_audit_exempts_only_the_static_network_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'lib').mkdir()
+            (root / 'bin').mkdir()
+            (root / 'bin' / 'qt.conf').write_text('Prefix = ..\nPlugins = plugins\nLibExecs = libexec\nData = .\nTranslations = translations\n')
+            (root / 'libexec').mkdir()
+            (root / 'libexec' / 'QtWebEngineProcess').touch()
+            (root / 'lib' / 'libQt6Core.so.6').touch()
+            for name in ('resources/icudtl.dat', 'resources/qtwebengine_resources.pak', 'translations/qtwebengine_locales'):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).touch()
+            linked = root / 'bin' / 'JustConnect'
+            static_helper = root / 'libexec' / 'justconnect-network-helper'
+            static_helper.touch()
+            linked.touch()
+            stray = root / 'bin' / 'static-go-tool'
+            stray.touch()
+            static_paths = {static_helper, stray}
+            dynamic = (' 0x000000000000000f (RUNPATH) Library runpath: [$ORIGIN/../lib]\n'
+                       ' 0x0000000000000001 (NEEDED) Shared library: [libQt6Core.so.6]\n')
+            def fake_run(*args, **kwargs):
+                tool, target = str(args[0]), Path(str(args[-1]))
+                if tool == 'readelf' and '--file-header' in map(str, args):
+                    return '  Machine:              Advanced Micro Devices X86-64'
+                if tool == 'readelf':
+                    return 'There is no dynamic section in this file.' if target in static_paths else dynamic
+                if tool == 'ldd':
+                    return '\tlibQt6Core.so.6 => /lib/x86_64-linux-gnu/libQt6Core.so.6 (0x00007f)\n'
+                raise AssertionError(args)
+            with patch.object(package, 'run', side_effect=fake_run):
+                audited = package.linux_audit([linked, static_helper], root, 'amd64', {})
+                self.assertEqual(audited['files'][0]['dependencies'], {'libQt6Core.so.6': 'lib/libQt6Core.so.6'})
+                self.assertFalse(audited['files'][0].get('static', False))
+                self.assertEqual(audited['files'][1]['dependencies'], {})
+                self.assertTrue(audited['files'][1]['static'])
+            with patch.object(package, 'run', side_effect=fake_run), \
+                    self.assertRaisesRegex(RuntimeError, 'Unexpected static ELF'):
+                package.linux_audit([stray], root, 'amd64', {})
+
+    def test_linux_network_helper_checks_provenance_and_polkit_action(self):
+        revision = 'a' * 40
+        facts = {'protocol': package.LINUX_HELPER['protocol'], 'revision': revision,
+                 'source_state': 'clean', 'identity_ready': True}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / package.LINUX_HELPER['executable']
+            helper.parent.mkdir(parents=True)
+            helper.touch()
+            helper.chmod(0o755)
+            policy = root / package.LINUX_HELPER['policy']
+            policy.parent.mkdir(parents=True)
+            policy.write_text('<policyconfig><action id="org.justconnect.network-helper">'
+                              '<annotate name="org.freedesktop.policykit.exec.path.js">'
+                              + str(root / 'libexec/justconnect-network-helper') + '</annotate></action></policyconfig>')
+            script = root / package.LINUX_HELPER['setup_script']
+            script.write_text('#!/bin/sh\nexit 0\n')
+            script.chmod(0o755)
+            with patch.object(package, 'run', return_value=json.dumps(facts)):
+                self.assertEqual(package.check_linux_network_helper(root, {}, revision),
+                                 {'protocol': facts['protocol'], 'revision': revision,
+                                  'source_state': 'clean', 'policy': True, 'setup_script': True})
+            script.chmod(0o644)
+            with patch.object(package, 'run', return_value=json.dumps(facts)), \
+                    self.assertRaisesRegex(RuntimeError, 'setup script'):
+                package.check_linux_network_helper(root, {}, revision)
+            script.unlink()
+            with patch.object(package, 'run', return_value=json.dumps(facts)), \
+                    self.assertRaisesRegex(RuntimeError, 'setup script'):
+                package.check_linux_network_helper(root, {}, revision)
+            script.write_text('#!/bin/sh\nexit 0\n')
+            script.chmod(0o755)
+            helper.unlink()
+            with self.assertRaisesRegex(RuntimeError, 'Missing packaged Linux network helper'):
+                package.check_linux_network_helper(root, {}, revision)
+            helper.touch()
+            helper.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'mode 0755'):
+                package.check_linux_network_helper(root, {}, revision)
+            helper.chmod(0o755)
+            for key, value in [('revision', 'old'), ('protocol', 999), ('protocol', True),
+                               ('identity_ready', False), ('source_state', ''), ('source_state', 1)]:
+                with self.subTest(key=key), patch.object(package, 'run', return_value=json.dumps(dict(facts, **{key: value}))), \
+                        self.assertRaisesRegex(RuntimeError, 'runtime check'):
+                    package.check_linux_network_helper(root, {}, revision)
+            for text in ('<policyconfig />', '<policyconfig><action id="org.justconnect.network-helper" /></policyconfig>',
+                         '<policyconfig><annotate name="org.freedesktop.policykit.exec.path.js">/bin/sh</annotate></policyconfig>'):
+                policy.write_text(text)
+                with patch.object(package, 'run', return_value=json.dumps(facts)), \
+                        self.assertRaisesRegex(RuntimeError, 'polkit action'):
+                    package.check_linux_network_helper(root, {}, revision)
+
+    def test_linux_verify_records_the_network_helper_and_fails_without_it(self):
+        revision = 'a' * 40
+        facts = {'protocol': package.LINUX_HELPER['protocol'], 'revision': revision,
+                 'source_state': 'clean', 'identity_ready': True}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = root / 'JustConnect'
+            host.write_bytes(b'\0' * 60)
+            helper = root / package.LINUX_HELPER['executable']
+            helper.parent.mkdir(parents=True)
+            helper.write_text('#!/bin/sh\n')
+            helper.chmod(0o755)
+            (root / 'source-revision.txt').write_text(revision)
+            (root / 'core-toolchain.txt').write_text('CGO_ENABLED=1')
+            notices = root / 'licenses'
+            notices.mkdir()
+            for name in ('LICENSE', 'LICENSE.ping', 'LICENSE.lucide', 'ThirdPartyNotices.txt'):
+                (notices / name).touch()
+            archive = root / 'package.tar.gz'
+            archive.touch()
+            output = root / 'report.json'
+            def self_test(*args, **kwargs):
+                return SimpleNamespace(returncode=0, stdout=b'{}')
+            def linux_patches():
+                return patch.object(package, 'clean_environment', return_value={}), \
+                    patch.object(package.subprocess, 'run', side_effect=self_test), \
+                    patch.object(package, 'validate_report'), \
+                    patch.object(package, 'check_proxy_recovery', return_value={}), \
+                    patch.object(package, 'check_signin_browser', return_value={}), \
+                    patch.object(package, 'linux_audit', return_value={}), \
+                    patch.object(package.platform, 'machine', return_value='x86_64'), \
+                    patch.object(package.sys, 'platform', 'linux')
+            patches = linux_patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], \
+                    patch.object(package, 'check_linux_network_helper', return_value=facts) as helper_check:
+                package.verify(root, host, revision, 'preview', output, archive)
+                self.assertEqual(json.loads(output.read_text())['network_helper'], facts)
+                self.assertEqual(helper_check.call_count, 1)
+            helper.unlink()
+            output.unlink()
+            patches = linux_patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], \
+                    self.assertRaisesRegex(RuntimeError, 'Missing packaged Linux network helper'):
+                package.verify(root, host, revision, 'preview', output, archive)
 
 
 if __name__ == '__main__':
