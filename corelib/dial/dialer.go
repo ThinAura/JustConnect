@@ -40,6 +40,10 @@ type Dialer struct {
 	scopedIndex   *ipresource.Index
 	resourceIndex *ipresource.Index
 	alwaysUseVPN  bool
+	// campusForced marks dialer copies whose flows were already captured into the
+	// campus path (TUN capture, campus DNS transport, probes). A local-proxy user
+	// dial is not captured, so it may still reach the login origin directly.
+	campusForced bool
 }
 
 func dialDirect(ctx context.Context, network, address string) (net.Conn, error) {
@@ -52,7 +56,7 @@ func (d *Dialer) CampusOnly() *Dialer {
 		return d
 	}
 	campus := *d
-	campus.alwaysUseVPN = true
+	campus.alwaysUseVPN, campus.campusForced = true, true
 	return &campus
 }
 
@@ -114,6 +118,7 @@ func (d *Dialer) DialCampusDNS(ctx context.Context, network, address string) (ne
 	}
 	campus := *d
 	campus.alwaysUseVPN, campus.ProtectionPolicy = true, nil
+	campus.campusForced = true // The DNS transport stays in the tunnel even on a shared login-origin address.
 	// This applies only to this fixed DNS connection; query names and answers keep the original policy.
 	ctx = context.WithValue(ctx, resolve.ContextKeyProtectionPolicy, (*policy.ProtectionPolicy)(nil))
 	return campus.DialIPPort(ctx, network, address)
@@ -188,6 +193,12 @@ func (d *Dialer) dialIP(ctx context.Context, network string, endpoint netip.Addr
 		useVPN, _ = ctx.Value(resolve.ContextKeyDomainDNS).(bool)
 	}
 	if address == d.OriginalAuthentication.Address && (host == d.OriginalAuthentication.Name || !matchedResource) {
+		if useVPN && !d.campusForced {
+			// A local-proxy user flow to the login origin keeps the original network
+			// instead of being refused; refusing made the portal unreachable in the
+			// browser (socks_destination_denied for id.<campus>.edu.cn).
+			return d.dialOrdinary(ctx, network, endpoint.String())
+		}
 		if useVPN {
 			return nil, policy.ErrProtectedTarget
 		}

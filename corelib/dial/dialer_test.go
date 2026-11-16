@@ -93,6 +93,49 @@ func TestOriginalAuthenticationAddressKeepsTheOrdinaryPath(t *testing.T) {
 	}
 }
 
+func TestLocalProxyUserFlowReachesTheAuthenticationOriginOnTheOriginalNetwork(t *testing.T) {
+	address := netip.MustParseAddr("192.0.2.7")
+	stack := &capturingStack{}
+	// Local proxy constructs the dialer with forced VPN routing and no capture.
+	d := NewDialer(stack, nil, nil, true)
+	d.OriginalAuthentication = AuthenticationOrigin{Name: "login.test", Address: address}
+	ordinary := errors.New("ordinary upstream reached")
+	d.Upstream = func() client.DialContextFunc {
+		return func(_ context.Context, network, address string) (net.Conn, error) {
+			if network != "tcp" || address != "login.test:443" {
+				t.Fatalf("unexpected upstream destination: %s %s", network, address)
+			}
+			return nil, ordinary
+		}
+	}
+	ctx := context.WithValue(t.Context(), resolve.ContextKeyResolveHost, "login.test")
+	if _, err := d.DialIPPort(ctx, "tcp", "192.0.2.7:443"); !errors.Is(err, ordinary) {
+		t.Fatalf("local proxy user flow to the login origin was refused: %v", err)
+	}
+	if stack.tcpCalls != 0 {
+		t.Fatal("login origin entered the tunnel")
+	}
+}
+
+func TestCampusDNSTransportNeverBorrowsTheAuthenticationOriginExemption(t *testing.T) {
+	address := netip.MustParseAddr("192.0.2.7")
+	r := resolve.NewResolver(nil, "192.0.2.7", "", 60, nil, nil, true)
+	defer r.Close()
+	stack := &capturingStack{}
+	d := NewDialer(stack, r, nil, true)
+	d.OriginalAuthentication = AuthenticationOrigin{Name: "login.test", Address: address}
+	ordinary := errors.New("ordinary upstream reached")
+	d.Upstream = func() client.DialContextFunc {
+		return func(context.Context, string, string) (net.Conn, error) { return nil, ordinary }
+	}
+	if _, err := d.DialCampusDNS(t.Context(), "tcp", "192.0.2.7:53"); !errors.Is(err, policy.ErrProtectedTarget) {
+		t.Fatalf("campus DNS transport lost its tunnel exception: %v", err)
+	}
+	if stack.tcpCalls != 0 {
+		t.Fatal("campus DNS transport left the tunnel")
+	}
+}
+
 func TestAuthenticationOriginDoesNotReserveAnotherGrantedName(t *testing.T) {
 	address := netip.MustParseAddr("192.0.2.7")
 	campus := &capturingStack{}

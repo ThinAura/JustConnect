@@ -270,6 +270,7 @@ func (s *Session) Run(parent context.Context, observer Observer) (err error) {
 	resolver = resolve.NewResolver(network, remoteDNS, options.SecondaryDNS, ttl, domains, dnsResource, !options.DisableRemoteDNS && remoteDNS != "")
 	resolver.ProtectionPolicy = options.ProtectionPolicy
 	resolver.OriginalDNS = options.OriginalDNS
+	resolver.Diagnostic = clientOptions.Diagnostic
 
 	dialer := dial.NewDialer(network, resolver, ips, options.LocalProxy)
 	dialer.ProtectionPolicy = options.ProtectionPolicy
