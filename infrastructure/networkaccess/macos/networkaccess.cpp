@@ -185,7 +185,8 @@ void MacNetworkAccess::observeModel()
 {
     if (stage != Stage::Ready || generation != policy->currentGeneration() || automaticPolicy || policy->isBusy()) return;
     if (policy->status() != CoreEngine::RequestStatus::Success) {
-        stage = Stage::Prepared; observation.stop(); emit lost(attempt,{Status::Failed,QStringLiteral("Cannot completely read the original network; restoring ownership."),true}); return;
+        stage = Stage::Prepared; observation.stop(); emit lost(attempt,{Status::Failed,QStringLiteral("Cannot completely read the original network (%1); restoring ownership.")
+            .arg(policy->failureDetail().isEmpty() ? QStringLiteral("reason unavailable") : policy->failureDetail()),true}); return;
     }
     const auto model = policy->model();
     const auto exit = macOriginalExitSnapshot(model["network"].toObject(),model["resources"].toObject()["underlay_interface"].toString());

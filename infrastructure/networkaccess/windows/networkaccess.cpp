@@ -243,7 +243,8 @@ void WindowsNetworkAccess::driveStop()
 void WindowsNetworkAccess::observeModel()
 {
     if(stage!=Stage::Ready || generation!=policy->currentGeneration() || automaticPolicy || policy->isBusy())return;
-    if(policy->status()!=CoreEngine::RequestStatus::Success){fail({Status::Failed,"Cannot completely read the original network; restoring ownership.",true});return;}
+    if(policy->status()!=CoreEngine::RequestStatus::Success){fail({Status::Failed,QStringLiteral("Cannot completely read the original network (%1); restoring ownership.")
+        .arg(policy->failureDetail().isEmpty() ? QStringLiteral("reason unavailable") : policy->failureDetail()),true});return;}
     const auto model=policy->model();
     const auto exit=originalExitSnapshot(model["network"].toObject(),model["resources"].toObject()["underlay_interface"].toString());
     if(!exit || *exit!=originalExit){stage=Stage::Prepared;observation.stop();emit restartRequired(attempt,"Original network exit changed; restoring before reconnecting.");return;}
