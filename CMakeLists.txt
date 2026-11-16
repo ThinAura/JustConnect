@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(JustConnect)
 
-if(NOT WIN32 AND NOT APPLE)
-    message(FATAL_ERROR "JustConnect supports only Windows and macOS")
+if(NOT WIN32 AND NOT APPLE AND NOT UNIX)
+    message(FATAL_ERROR "JustConnect supports only Windows, macOS and Linux")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -110,7 +110,7 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/app-icon.rc")
 
     set(PLATFORM_LIBS shell32)
-else()
+elseif(APPLE)
     message("Building for MacOS")
 
     string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJ_VER}")
@@ -127,6 +127,19 @@ else()
 
     set_target_properties(${PROJECT_NAME}
         PROPERTIES MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/Info.plist")
+else()
+    message("Building for Linux")
+
+    qt_add_executable(${PROJECT_NAME} main.cpp)
+
+    configure_file(resource/justconnect.desktop.in justconnect.desktop @ONLY)
+    include(GNUInstallDirs)
+    install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT CoreRuntime)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/justconnect.desktop"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/applications" COMPONENT CoreRuntime)
+    install(FILES "${REPO}/resource/app-icon.svg"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
+        RENAME "${PROJECT_NAME}.svg" COMPONENT CoreRuntime)
 endif()
 
 target_link_libraries(justconnect_desktop
@@ -175,7 +188,9 @@ if(BUILD_TESTING)
     add_executable(serversettingswidget_test tests/serversettingswidget_test.cpp
         presentation/presentationhelpers.cpp
         presentation/widgets/serversettingswidget.cpp)
-    target_link_libraries(serversettingswidget_test PRIVATE Qt6::Widgets justconnect_application justconnect_ui_resources)
+    # The settings widget consults linuxNetworkHelperAvailability() on Linux,
+    # which lives in the platform archive.
+    target_link_libraries(serversettingswidget_test PRIVATE Qt6::Widgets justconnect_application justconnect_platform justconnect_ui_resources)
     add_test(NAME serversettingswidget_test COMMAND serversettingswidget_test)
     set_tests_properties(serversettingswidget_test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
     justconnect_system_integration_tests(platformbackend_test justconnect_platform)

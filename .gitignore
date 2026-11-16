@@ -36,6 +36,10 @@
 /cmake-build*
 /build
 
+# Linux deploy output
+/JustConnect/
+/JustConnect-*.tar.gz
+
 # CLion
 /.idea
 
