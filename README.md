@@ -7,7 +7,7 @@
 <p align="center"><strong>Connect to campus. Keep your network.</strong></p>
 
 <p align="center">
-  An open-source aTrust client for Windows and macOS.
+  An open-source aTrust client for Windows, macOS, and Linux.
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@ Always remember your saved sign-in between launches. As long as it’s still val
 
 ### Lightweight. Ready to go.
 
-14–22 MiB for JustConnect vs. 201–224 MiB for official aTrust client. Get onto your campus network with about a tenth of the download.
+14–22 MiB for the Windows and macOS builds vs. 201–224 MiB for official aTrust client. Get onto your campus network with about a tenth of the download. [The Linux client makes use of QtWebEngine and therefore takes up more space than Windows and macOS builds.]
 
 ## Screenshots
 
@@ -45,6 +45,7 @@ Always remember your saved sign-in between launches. As long as it’s still val
 | --- | --- |
 | **Windows** · x64 or ARM64 | Run the installer, or extract the portable ZIP and open `JustConnect.exe`. |
 | **macOS** · 14.4 or later, Apple silicon or Intel | Open the DMG and drag JustConnect into Applications. |
+| **Linux** · x64 | Extract the tarball and run `bin/JustConnect`. Both routing modes work; automatic (TUN) routing additionally needs its privileged helper root-owned — run `sudo ./setup-network-helper.sh` inside the extracted package after every extraction (the app shows the exact commands too). The download is larger than the other platforms because it bundles the Qt/Chromium sign-in browser runtime. See [docs/build-linux.md](docs/build-linux.md) to build from source. |
 
 Windows installers are unsigned, so Windows may show a warning.
 
