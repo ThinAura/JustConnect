@@ -5,8 +5,8 @@ elseif(APPLE)
     enable_language(OBJCXX)
     set(JC_BROWSER_QPA cocoa)
 else()
-    # QtWebEngine renders through Chromium; offscreen also works for the appearance probes.
-    set(JC_BROWSER_QPA offscreen)
+    # WebKitGTK embeds through X11; browser probes need a real display (Xvfb on CI).
+    set(JC_BROWSER_QPA xcb)
 endif()
 
 function(justconnect_signin_browser TARGET)
@@ -35,9 +35,13 @@ function(justconnect_signin_browser TARGET)
         set_source_files_properties("${REPO}/presentation/browser/macos/browser.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(${TARGET} PRIVATE "-framework WebKit" "-framework AppKit" "-framework Security")
     else()
-        find_package(Qt6 REQUIRED COMPONENTS WebEngineWidgets)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
         target_sources(${TARGET} PRIVATE "${REPO}/presentation/browser/linux/browser.cpp")
-        target_link_libraries(${TARGET} PUBLIC Qt6::WebEngineWidgets)
+        target_link_libraries(${TARGET} PUBLIC PkgConfig::WEBKIT)
+        # X11 embedding and focus hand-off use Xlib directly.
+        pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+        target_link_libraries(${TARGET} PRIVATE PkgConfig::X11)
         # The custom campus CA anchor check needs OpenSSL; without it unverified-CA sign-in fails closed.
         find_package(OpenSSL QUIET)
         if(OpenSSL_FOUND)

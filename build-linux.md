@@ -17,37 +17,44 @@ builds.
 | --- | --- | --- |
 | GCC / Clang + binutils | any recent | C++17, cgo compiler |
 | CMake | 3.20+ | Ninja recommended |
-| Qt | 6.10 – 6.12 | must include `WebEngineWidgets` |
+| Qt | 6.8+ | `Core` `Concurrent` `Gui` `Widgets` `Network` `Svg` plus `LinguistTools`; CI and the reference SDK use 6.12.0 |
+| WebKitGTK 4.1 | any | the Linux sign-in browser; `pkg-config` must resolve `webkit2gtk-4.1` and `x11` |
+| OpenSSL dev | any | optional — without it the sign-in browser cannot trust custom campus CAs and fails closed |
 | Go | **exactly** the version pinned in `corelib/go.mod` | the build sets `GOTOOLCHAIN=local` and rejects other versions |
 | Python 3 | 3.9+ | packaging/verification helpers |
-| patchelf | any | only needed for packaging |
+| patchelf | any | only needed for the portable tarball |
+| dpkg-dev | any | only needed for the Debian package (`dpkg-deb`) |
 
 On Ubuntu 24.04 (glibc 2.39) the distribution Qt is 6.4 — too old. Install Qt
-6.10+ from the Qt SDK instead (see below). Package builds target Ubuntu 24.04
+6.8+ from the Qt SDK instead (see below). Package builds target Ubuntu 24.04
 as the runtime floor; older distributions need newer glibc/fontconfig than
 they ship.
 
 ### Distribution packages
 
 ```sh
-sudo apt-get install -y build-essential cmake ninja-build python3 \
+sudo apt-get install -y build-essential cmake ninja-build python3 pkg-config \
   libgl1-mesa-dev libegl-dev libxkbcommon-dev libfontconfig1-dev \
-  libnss3-dev libxcomposite-dev libxcursor-dev libxi-dev libxtst-dev \
-  libxrandr-dev libdrm-dev libgbm-dev libasound2-dev libatspi2.0-dev
+  libx11-dev libssl-dev libwebkit2gtk-4.1-dev
 ```
 
-`libnss3` is required at runtime by the QtWebEngine sign-in browser.
+The sign-in browser links WebKitGTK and drives X11 embedding directly
+(`libwebkit2gtk-4.1-dev`, `libx11-dev`); `libssl-dev` enables the custom
+campus-CA anchor check. The QtWebEngine-era package list (`libnss3-dev`,
+`libxcomposite-dev`, `libatspi2.0-dev`, …) is no longer needed to build — the
+application does not link `WebEngineWidgets`.
 
 ### Qt SDK
 
 Use [aqtinstall](https://github.com/miurahr/aqtinstall) or the Qt online
-installer. The build needs `qtbase qtsvg qtdeclarative qttools
-qttranslations qtwebchannel qtpositioning qtwebengine`:
+installer. The SDK needs the default widget archives — the application links
+`Core Concurrent Gui Widgets Network Svg` plus `LinguistTools`, and
+`qtdeclarative` is only needed because the SDK's `lrelease` binary links
+QtQml (the application itself does not):
 
 ```sh
 python3 -m pip install aqtinstall
-aqt install-qt linux desktop 6.12.0 linux_gcc_64 \
-  -m qtwebchannel qtpositioning qtwebengine -O ~/Qt
+aqt install-qt linux desktop 6.12.0 linux_gcc_64 -O ~/Qt
 ```
 
 > aqt's architecture name is `linux_gcc_64` (new-style naming); the SDK still
@@ -67,13 +74,11 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 cmake --build build
 ```
 
-Run the test suite (Qt tests use the `offscreen` platform; the QtWebEngine
-tests need Chromium flags on CI-like sandboxed environments):
+Run the test suite (Qt tests use the `offscreen` platform; the WebKitGTK
+sign-in browser probe also passes headless):
 
 ```sh
-QT_QPA_PLATFORM=offscreen \
-QTWEBENGINE_CHROMIUM_FLAGS='--no-sandbox --disable-gpu --disable-dev-shm-usage' \
-  ctest --test-dir build --output-on-failure
+QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 ```
 
 ## Install
@@ -112,10 +117,40 @@ unavailable with a diagnostic that names the exact commands (the same steps
 appear on the server settings page) instead of failing after the password
 prompt.
 
+## Package (Debian)
+
+The Debian package ships the minimal payload and declares the distribution
+libraries as package dependencies:
+
+```sh
+cmake -S . -B build-deb -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build-deb
+./scripts/package-deb.sh build-deb justconnect_$(git describe --tags --match 'v*' |
+  sed -e 's/^v//' -e 's/-[0-9]*-g[0-9a-f]*$//')-1_amd64.deb
+```
+
+Install it with `sudo apt install ./justconnect_<version>_amd64.deb`. The
+prefix must stay `/usr`: the helper path is compiled into the application and
+annotated in the polkit policy (`/usr/libexec/justconnect-network-helper`),
+and `dpkg` delivers the helper root-owned, which is exactly what `pkexec`
+requires. The payload is `usr/bin/JustConnect`,
+`usr/bin/JustConnectProxyRecovery` (system proxy crash recovery, located next
+to the application binary), `usr/libexec/justconnect-network-helper`, the
+polkit policy, the desktop entry and icon, and license documents. Everything
+else — Qt, WebKitGTK for the sign-in browser, libsecret for the keyring,
+`pkexec`, dconf — is declared in `Depends:`; `fonts-dejavu-core` is a
+`Recommends` for rendering on minimal systems. Versions that do not start
+with a digit — nightly identifiers such as `f70134c-nightly` — are normalized
+to `0.0.0~<version>`, which Debian's version ordering keeps below every real
+release. CI (`.github/workflows/build.yml`) runs these same steps and
+publishes the `.deb` next to the portable tarball.
+
 ## Package (portable tarball)
 
 The shipped Linux artifact is a portable, self-contained tree with bundled
-Qt libraries, plugins and QtWebEngine resources:
+Qt libraries and plugins. Sign-in additionally needs the system
+`libwebkit2gtk-4.1` runtime (standard on desktop distributions):
 
 ```sh
 ./scripts/deploy-linux.sh JustConnect build "$HOME/Qt/6.12.0/gcc_64"
@@ -171,10 +206,8 @@ the extracted tree.
 - **Credential storage** uses libsecret when available and falls back to a
   0600 file next to the app data otherwise.
 - **Autostart** writes an XDG autostart entry under `$XDG_CONFIG_HOME`.
-- **SSO sign-in browser** uses QtWebEngine. On Ubuntu 23.10+ unprivileged
-  user namespaces are restricted by default, which can prevent the Chromium
-  sandbox from starting; launch with
-  `QTWEBENGINE_CHROMIUM_FLAGS=--no-sandbox` (or install an AppArmor profile
-  for the binary) if the sign-in browser fails to open.
+- **SSO sign-in browser** embeds WebKitGTK through X11, so Wayland sessions
+  run it via XWayland. It needs `libwebkit2gtk-4.1` at runtime — the Debian
+  package declares it, and desktop distributions ship it.
 - Wayland sessions run through XWayland (the packaged Qt build ships the xcb
   platform plugin).

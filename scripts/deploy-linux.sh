@@ -6,9 +6,11 @@
 #     bin/JustConnect bin/JustConnectProxyRecovery bin/qt.conf
 #     lib/                 bundled Qt libraries (RUNPATH $ORIGIN)
 #     plugins/<category>/  Qt plugins (RUNPATH $ORIGIN/../../lib)
-#     libexec/QtWebEngineProcess
-#     resources/ translations/  Chromium/QtWebEngine data
+#     libexec/             privileged network helper
 #     core-toolchain.txt source-revision.txt licenses/
+#
+# The sign-in browser is WebKitGTK, a system dependency; nothing bundles a
+# browser runtime.
 set -euo pipefail
 
 target="${1:?Specify the application name}"
@@ -26,7 +28,7 @@ mkdir -p "$package"
 
 cmake --install "$build" --config Release --component CoreRuntime --prefix "$package"
 
-mkdir -p "$package/lib" "$package/libexec" "$package/resources" "$package/translations/qtwebengine_locales"
+mkdir -p "$package/lib"
 
 declare -A bundled_libs=()
 
@@ -64,8 +66,6 @@ bundle_object() {
 
 bundle_object "$package/bin/$target"
 bundle_object "$package/bin/JustConnectProxyRecovery"
-cp -L "$qt_prefix/libexec/QtWebEngineProcess" "$package/libexec/QtWebEngineProcess"
-bundle_object "$package/libexec/QtWebEngineProcess"
 
 qt_plugins=(
     platforms/libqxcb.so
@@ -107,9 +107,6 @@ for directory in "${qt_plugin_directories[@]}"; do
     done
 done
 
-find "$qt_prefix/resources" -maxdepth 1 -type f -exec cp {} "$package/resources/" \;
-cp "$qt_prefix/translations/qtwebengine_locales/"*.pak "$package/translations/qtwebengine_locales/"
-
 # qt.conf next to the executables redirects every Qt search path into the package.
 cat > "$package/bin/qt.conf" <<'EOF'
 [Paths]
@@ -121,7 +118,7 @@ Translations = translations
 EOF
 
 patchelf --set-rpath '$ORIGIN/../lib' \
-    "$package/bin/$target" "$package/bin/JustConnectProxyRecovery" "$package/libexec/QtWebEngineProcess"
+    "$package/bin/$target" "$package/bin/JustConnectProxyRecovery"
 find "$package/lib" "$package/plugins" -name '*.so*' -type f -print0 | while IFS= read -r -d '' object; do
     if [[ "$object" == "$package/lib/"* ]]; then
         patchelf --set-rpath '$ORIGIN' "$object"

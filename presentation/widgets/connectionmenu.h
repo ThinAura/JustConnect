@@ -1,5 +1,4 @@
 #pragma once
-#include <QAccessibilityHints>
 #include <QAction>
 #include <QApplication>
 #include <QKeyEvent>

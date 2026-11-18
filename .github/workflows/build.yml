@@ -68,14 +68,13 @@ jobs:
             libgl1-mesa-dev libegl-dev libxkbcommon-dev libfontconfig1-dev \
             libnss3-dev libxcomposite-dev libxcursor-dev libxi-dev libxtst-dev \
             libxrandr-dev libdrm-dev libgbm-dev libasound2-dev libatspi2.0-dev \
-            patchelf
+            libwebkit2gtk-4.1-dev patchelf
 
       - name: Install Qt
         uses: ./.github/actions/setup-qt
         with:
           host: ${{ matrix.qt_host }}
           arch: ${{ matrix.qt_arch }}
-          archives: ${{ runner.os == 'Linux' && 'qtbase qtsvg qtdeclarative qttools qttranslations qtwebchannel qtpositioning qtwebengine' || 'qtbase qtsvg qtdeclarative qttools qttranslations' }}
 
       - name: Restore static macOS Qt
         if: runner.os == 'macOS'
@@ -121,6 +120,9 @@ jobs:
             fi
             echo "APP_VERSION=${RELEASE_VERSION#v}" >> "$GITHUB_ENV"
           fi
+          # Reused verbatim by the Debian package build; platform-specific
+          # arguments stay out of it.
+          echo "VERSION_ARGS=${version_args[*]}" >> "$GITHUB_ENV"
           platform_args=()
           if [[ "$RUNNER_OS" == 'macOS' ]]; then
             platform_args=(
@@ -141,9 +143,6 @@ jobs:
         run: ctest --test-dir build --build-config Release --output-on-failure
         env:
           QT_QPA_PLATFORM: offscreen
-          # QtWebEngine exists only in the Linux SDK; the variable is inert elsewhere.
-          # --no-sandbox is required on Ubuntu 24.04, which restricts unprivileged namespaces.
-          QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox --disable-gpu --disable-dev-shm-usage
 
       - name: Build Windows system permission helper
         if: runner.os == 'Windows'
@@ -239,6 +238,35 @@ jobs:
           tar -xzf "$ARCHIVE_NAME.tar.gz" -C "$RUNNER_TEMP/package-check"
           python scripts/verify-package.py "$RUNNER_TEMP/package-check/$TARGET_NAME" "$RUNNER_TEMP/package-check/$TARGET_NAME/bin/$TARGET_NAME" --revision "$GITHUB_SHA" --version "$APP_VERSION" --archive "$ARCHIVE_NAME.tar.gz" --output "build/$ARCHIVE_NAME.json" --browser-probe "build/signinbrowser_test"
 
+      - name: Package Debian
+        if: runner.os == 'Linux'
+        run: |
+          # The portable tarball keeps the default /usr/local prefix (matching
+          # setup-network-helper.sh --system); the Debian package needs /usr so
+          # the compiled-in helper path and the polkit annotation match the
+          # installed location exactly. Both are declared dependencies, so a
+          # test-free rebuild is enough.
+          cmake -S . -B build-deb -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF $VERSION_ARGS
+          cmake --build build-deb --config Release --parallel 3
+          ./scripts/package-deb.sh build-deb "$ARCHIVE_NAME.deb" "$APP_VERSION"
+
+      - name: Verify Debian package
+        if: runner.os == 'Linux'
+        run: |
+          test "$(dpkg-deb -f "$ARCHIVE_NAME.deb" Package)" = justconnect
+          test "$(dpkg-deb -f "$ARCHIVE_NAME.deb" Architecture)" = amd64
+          rm -rf "$RUNNER_TEMP/deb-check"
+          dpkg-deb -x "$ARCHIVE_NAME.deb" "$RUNNER_TEMP/deb-check"
+          test -x "$RUNNER_TEMP/deb-check/usr/bin/JustConnect"
+          test -x "$RUNNER_TEMP/deb-check/usr/libexec/justconnect-network-helper"
+          test -s "$RUNNER_TEMP/deb-check/usr/share/polkit-1/actions/org.justconnect.network-helper.policy"
+          # The extracted payload is the system-installed layout: run the same
+          # offline ABI check the release preview runs against installed trees.
+          # System libraries come from the runner; Qt comes from the SDK.
+          LD_LIBRARY_PATH="$QT_ROOT_DIR/lib" "$RUNNER_TEMP/deb-check/usr/bin/JustConnect" --core-self-test \
+            | tee "build/$ARCHIVE_NAME-deb.json" | jq -e '.ok == true'
+
       - name: Upload install package
         id: package
         uses: actions/upload-artifact@v7.0.2
@@ -247,6 +275,28 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: ${{ env.ARCHIVE_NAME }}.${{ runner.os == 'Windows' && 'zip' || (runner.os == 'macOS' && 'dmg' || 'tar.gz') }}
+
+      - name: Upload Debian package
+        if: runner.os == 'Linux'
+        id: deb-package
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+          name: ${{ env.ARCHIVE_NAME }}.deb
+          path: ${{ env.ARCHIVE_NAME }}.deb
+
+      - name: Confirm the upload matches the verified Debian package
+        if: runner.os == 'Linux'
+        env:
+          UPLOADED_DIGEST: ${{ steps.deb-package.outputs.artifact-digest }}
+        run: |
+          expected=$(sha256sum "$ARCHIVE_NAME.deb" | cut -d' ' -f1)
+          if [ "${UPLOADED_DIGEST#sha256:}" != "$expected" ]; then
+            echo "Uploaded Debian package differs from the verified .deb" >&2
+            exit 1
+          fi
 
       - name: Confirm the upload matches the verified install package
         shell: python
@@ -267,6 +317,7 @@ jobs:
           retention-days: 14
           path: |
             build/${{ env.ARCHIVE_NAME }}.json
+            build/${{ env.ARCHIVE_NAME }}-deb.json
 
   macos_preview_launch:
     name: Open macOS 27 Apple Silicon DMG
@@ -373,7 +424,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v8.0.2
         with:
-          pattern: ${{ needs.source.outputs.prefix }}-*.{zip,dmg,exe,tar.gz}
+          pattern: ${{ needs.source.outputs.prefix }}-*.{zip,dmg,exe,tar.gz,deb}
           skip-decompress: true
           merge-multiple: true
           path: packages
@@ -400,7 +451,7 @@ jobs:
           sha256sum --check "$prefix-source.tar.gz.sha256"
           assets=("$prefix"-windows-{x64,arm64}.zip "$prefix"-windows-{x64,arm64}-setup.exe
                   "$prefix"-macos-{x64,arm64}.dmg "$prefix"-linux-x64.tar.gz
-                  "$prefix"-source.tar.gz)
+                  "$prefix"-linux-x64.deb "$prefix"-source.tar.gz)
           sha256sum -- "${assets[@]}" > SHA256SUMS.txt
           gh release create "$RELEASE_TAG" "${assets[@]}" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" \
             --verify-tag --title "JustConnect $RELEASE_TAG" --notes-file "$notes"

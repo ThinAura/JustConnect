@@ -29,7 +29,7 @@ endif()
 add_compile_definitions(PROJ_VER="${PROJ_VER}")
 message("PROJ_VER=${PROJ_VER}")
 
-find_package(Qt6 6.10 COMPONENTS
+find_package(Qt6 6.8 COMPONENTS
     Core
     Concurrent
     Gui
@@ -94,11 +94,50 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS LinguistTools)
 set(justconnect_desktop_catalog "${CMAKE_CURRENT_SOURCE_DIR}/resource/translations/justconnect_zh_CN.ts")
-qt_add_translations(justconnect_desktop
-    TS_FILES "${justconnect_desktop_catalog}"
-    RESOURCE_PREFIX "/i18n"
-    MERGE_QT_TRANSLATIONS
-    QT_TRANSLATION_CATALOGS qtbase)
+if(Qt6_VERSION VERSION_GREATER_EQUAL "6.9")
+    qt_add_translations(justconnect_desktop
+        TS_FILES "${justconnect_desktop_catalog}"
+        RESOURCE_PREFIX "/i18n"
+        MERGE_QT_TRANSLATIONS
+        QT_TRANSLATION_CATALOGS qtbase)
+else()
+    # MERGE_QT_TRANSLATIONS and QT_TRANSLATION_CATALOGS arrived in Qt 6.9; older
+    # Qt (the Linux port builds against Debian's 6.8) silently ignores them, so
+    # the qtbase catalog never reached the embedded qm and Qt standard strings
+    # (QPlatformTheme's Close button and friends) stayed English. Compile the
+    # application catalog and merge the qtbase catalog into it explicitly:
+    # lconvert keeps the application's own translations and fills the missing
+    # entries from qtbase, matching MERGE_QT_TRANSLATIONS semantics.
+    qt_add_lrelease(justconnect_desktop
+        TS_FILES "${justconnect_desktop_catalog}"
+        QM_FILES_OUTPUT_VARIABLE justconnect_qm_files)
+    get_target_property(justconnect_qmake_location Qt6::qmake LOCATION)
+    if(justconnect_qmake_location)
+        execute_process(COMMAND "${justconnect_qmake_location}" -query QT_INSTALL_TRANSLATIONS
+            RESULT_VARIABLE justconnect_qmake_result
+            OUTPUT_VARIABLE justconnect_qt_translations_dir
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+    find_file(justconnect_qtbase_catalog qtbase_zh_CN.qm
+        HINTS "${justconnect_qt_translations_dir}" "${Qt6_DIR}/../../../translations"
+        PATHS /usr/share/qt6/translations
+        NO_DEFAULT_PATH)
+    if(NOT justconnect_qtbase_catalog)
+        message(FATAL_ERROR "qtbase_zh_CN.qm was not found (QT_INSTALL_TRANSLATIONS=${justconnect_qt_translations_dir}); install the Qt translations package (qt6-translations-l10n) so Qt standard strings can be merged into the embedded catalog")
+    endif()
+    set(justconnect_merged_catalog "${CMAKE_CURRENT_BINARY_DIR}/i18n/justconnect_zh_CN.qm")
+    add_custom_command(OUTPUT "${justconnect_merged_catalog}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/i18n"
+        COMMAND Qt6::lconvert -i ${justconnect_qm_files} "${justconnect_qtbase_catalog}" -o "${justconnect_merged_catalog}"
+        DEPENDS ${justconnect_qm_files} "${justconnect_qtbase_catalog}"
+        VERBATIM)
+    set_source_files_properties("${justconnect_merged_catalog}" PROPERTIES GENERATED TRUE)
+    qt_add_resources(justconnect_desktop justconnect_translations
+        PREFIX "/i18n"
+        BASE "${CMAKE_CURRENT_BINARY_DIR}/i18n"
+        FILES "${justconnect_merged_catalog}")
+endif()
 
 if(WIN32)
     message("Building for Windows")

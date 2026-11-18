@@ -2456,6 +2456,13 @@ Some system settings may have changed. Check them before retrying.</source>
     </message>
 </context>
 <context>
+    <name>SignInBrowser</name>
+    <message>
+        <source>The sign-in page cannot be embedded in this desktop session and opened in a separate window instead. Complete the sign-in there.</source>
+        <translation>登录页面无法内嵌于当前桌面会话，已在独立窗口中打开；请在该窗口中完成登录。</translation>
+    </message>
+</context>
+<context>
     <name>LinuxNetworkAvailability</name>
     <message>
         <source>Cannot read /etc/resolv.conf; automatic routing has no supported DNS mechanism.</source>

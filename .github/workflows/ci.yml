@@ -39,14 +39,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libegl-dev libxkbcommon-dev libfontconfig1-dev \
             libnss3-dev libxcomposite-dev libxcursor-dev libxi-dev libxtst-dev \
-            libxrandr-dev libdrm-dev libgbm-dev libasound2-dev libatspi2.0-dev
+            libxrandr-dev libdrm-dev libgbm-dev libasound2-dev libatspi2.0-dev \
+            libwebkit2gtk-4.1-dev
 
       - name: Install Qt
         uses: ./.github/actions/setup-qt
         with:
           host: ${{ matrix.qt_host }}
           arch: ${{ matrix.qt_arch }}
-          archives: ${{ runner.os == 'Linux' && 'qtbase qtsvg qtdeclarative qttools qttranslations qtwebchannel qtpositioning qtwebengine' || 'qtbase qtsvg qtdeclarative qttools qttranslations' }}
 
       - name: Prepare Go and cgo toolchain
         uses: ./.github/actions/setup-core-toolchain
@@ -68,9 +68,6 @@ jobs:
         run: ctest --test-dir build --build-config Release --output-on-failure
         env:
           QT_QPA_PLATFORM: offscreen
-          # QtWebEngine exists only in the Linux SDK; the variable is inert elsewhere.
-          # --no-sandbox is required on Ubuntu 24.04, which restricts unprivileged namespaces.
-          QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox --disable-gpu --disable-dev-shm-usage
 
       - name: Verify installed Windows runtime with the Qt protocol host
         if: runner.os == 'Windows'

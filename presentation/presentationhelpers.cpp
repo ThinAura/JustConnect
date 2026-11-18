@@ -2,7 +2,6 @@
 
 #include <QApplication>
 #include <QAccessibleAnnouncementEvent>
-#include <QAccessibilityHints>
 #include <QClipboard>
 #include <QDate>
 #include <QDialog>

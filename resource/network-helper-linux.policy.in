@@ -12,6 +12,6 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin</allow_active>
     </defaults>
-    <annotate name="org.freedesktop.policykit.exec.path.js">@JUSTCONNECT_HELPER_PATH@</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">@JUSTCONNECT_HELPER_PATH@</annotate>
   </action>
 </policyconfig>

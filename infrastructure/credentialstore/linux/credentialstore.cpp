@@ -2,14 +2,22 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QLibrary>
 #include <QMutex>
 #include <QSaveFile>
 #include <QScopeGuard>
 #include <QStandardPaths>
 
-// libsecret is an optional runtime dependency: the store binds to libsecret-1.so.0 when present
-// and otherwise keeps secrets in 0600 files. Payloads are base64 so embedded NUL bytes survive.
+// libsecret is an optional runtime dependency: the store binds to libsecret-1.so.0 when present.
+// The keyring is the only persistent credential store. When the system keyring is unavailable —
+// libsecret missing, no secret service, or a transient failure — sign-in still works for the
+// current session, with secrets held in process memory only and never written to a plain file.
+// Records that must survive a restart (recovery journals) go through writePersistent(), the one
+// path allowed to keep a 0600 file. A locked or policy-denied keyring is the exception: those
+// states are temporary, and secrets must not be silently diverted to weaker storage that the
+// keyring could no longer supersede. Files written by earlier releases stay readable until the
+// keyring accepts the same key again. Payloads are base64 so embedded NUL bytes survive.
 namespace {
 
 struct GErrorMirror { unsigned domain; int code; char *message; };
@@ -22,7 +30,7 @@ using ClearFn = int (*)(const SecretSchemaMirror *, void *, GErrorMirror **, con
 using QuarkFn = unsigned (*)(void);
 using FreeFn = void (*)(void *);
 
-// SecretError values (libsecret/secret-enum-types.h) mapped onto shared credential statuses.
+// SecretError values (libsecret secret-types.h) mapped onto shared credential statuses.
 constexpr int SecretErrorLocked = 2, SecretErrorNoSuchObject = 3, SecretErrorAlreadyExists = 4;
 
 const char *const SecretLibrary = "libsecret-1.so.0";
@@ -52,7 +60,7 @@ public:
         QSaveFile output(file);
         if (!output.open(QIODevice::WriteOnly) || output.write(value) != value.size() || !output.commit())
             return {QFile::exists(file) ? CredentialStatus::Failed : CredentialStatus::PermissionDenied, {}};
-        // The fallback is deliberately weaker storage, so keep it strictly owner-only.
+        // The journal fallback is deliberately weaker storage, so keep it strictly owner-only.
         QFile::setPermissions(file, QFile::Permissions(int(QFile::ReadOwner) | int(QFile::WriteOwner)));
         return {CredentialStatus::Success, {}};
     }
@@ -71,7 +79,9 @@ public:
         store = reinterpret_cast<StoreFn>(library.resolve("secret_password_store_sync"));
         lookup = reinterpret_cast<LookupFn>(library.resolve("secret_password_lookup_sync"));
         clear = reinterpret_cast<ClearFn>(library.resolve("secret_password_clear_sync"));
-        quark = reinterpret_cast<QuarkFn>(library.resolve("secret_error_quark"));
+        // The exported getter is secret_error_get_quark; secret_error_quark is
+        // the internal G_DEFINE_QUARK helper and is absent from the symbol table.
+        quark = reinterpret_cast<QuarkFn>(library.resolve("secret_error_get_quark"));
         glib.setFileName(GlibLibrary);
         if (store && lookup && clear && quark && glib.load()) {
             errorFree = reinterpret_cast<void (*)(GErrorMirror *)>(glib.resolve("g_error_free"));
@@ -88,7 +98,12 @@ public:
     }
     CredentialResult read(const QString &key) override {
         if (!validKey(key)) return {CredentialStatus::InvalidArgument, {}};
-        if (!available()) return FileStore::read(key);
+        if (!available()) {
+            QMutexLocker guard(&mutex);
+            const auto cached = session.constFind(key);
+            if (cached != session.constEnd()) return {CredentialStatus::Success, *cached};
+            return FileStore::read(key);
+        }
         QMutexLocker guard(&mutex);
         GErrorMirror *error = nullptr;
         char *text = lookup(&schema, nullptr, &error, "service", ServiceAttribute,
@@ -98,42 +113,77 @@ public:
             gfree(text);
             const auto release = qScopeGuard([&] { if (error) errorFree(error); });
             if (!encoded.startsWith("b64:")) return {CredentialStatus::Failed, {}};
+            session.remove(key); // The keyring is authoritative again.
             return {CredentialStatus::Success, QByteArray::fromBase64(encoded.mid(4))};
         }
         const auto mapped = mapError(error);
         const auto release = qScopeGuard([&] { if (error) errorFree(error); });
-        // File copies from an earlier degraded run remain readable while the keyring is authoritative.
+        // Refusing states pass the keyring's answer through; weaker copies stay
+        // hidden while the keyring is locked or denies access.
+        if (mapped == CredentialStatus::Locked || mapped == CredentialStatus::Cancelled
+            || mapped == CredentialStatus::PermissionDenied)
+            return {mapped, {}, error ? qint64(error->code) : 0};
+        const auto cached = session.constFind(key);
+        if (cached != session.constEnd()) return {CredentialStatus::Success, *cached};
+        // Files written by earlier releases remain readable while the keyring is authoritative.
         const auto fallback = FileStore::read(key);
         if (fallback.succeeded()) return fallback;
-        if (mapped == CredentialStatus::NotFound) return {CredentialStatus::NotFound, {}};
-        return {mapped, {}, error ? qint64(error->code) : 0};
+        // Missing keys and unreachable keyrings both read as "nothing saved",
+        // keeping sign-in usable on systems without a secret service.
+        return {CredentialStatus::NotFound, {}};
     }
     CredentialResult write(const QString &key, const QByteArray &value) override {
         if (!validKey(key)) return {CredentialStatus::InvalidArgument, {}};
         if (value.size() > MaxBytes) return {CredentialStatus::Limit, {}};
-        if (!available()) return FileStore::write(key, value);
-        QMutexLocker guard(&mutex);
-        GErrorMirror *error = nullptr;
-        const auto encoded = QByteArray("b64:" + value.toBase64());
-        const auto stored = store(&schema, nullptr, SecretLabel, encoded.constData(), nullptr, &error,
-            "service", ServiceAttribute, "account", key.toUtf8().constData(), static_cast<const char *>(nullptr));
-        const auto release = qScopeGuard([&] { if (error) errorFree(error); });
-        if (stored) {
-            FileStore::remove(key); // Drop any file copy from an earlier degraded run.
+        if (!available()) {
+            QMutexLocker guard(&mutex);
+            session.insert(key, value);
             return {CredentialStatus::Success, {}};
         }
-        const auto mapped = mapError(error);
+        QMutexLocker guard(&mutex);
+        const auto stored = keyringWrite(key, value);
+        if (stored.succeeded()) {
+            session.remove(key);
+            FileStore::remove(key); // Drop any file copy from an earlier release.
+            return stored;
+        }
         // A locked or denied keyring must not silently divert secrets into weaker storage.
-        if (mapped == CredentialStatus::Locked || mapped == CredentialStatus::Cancelled
-            || mapped == CredentialStatus::PermissionDenied)
-            return {mapped, {}, error ? qint64(error->code) : 0};
+        if (stored.status == CredentialStatus::Locked || stored.status == CredentialStatus::Cancelled
+            || stored.status == CredentialStatus::PermissionDenied)
+            return stored;
+        // No usable keyring (absent service or transient failure): sign-in still works for
+        // the current session, in process memory only — credentials and tokens are never
+        // written to a plain file. Restart-durable records go through writePersistent().
+        session.insert(key, value);
+        return {CredentialStatus::Success, {}};
+    }
+    CredentialResult writePersistent(const QString &key, const QByteArray &value) override {
+        if (!validKey(key)) return {CredentialStatus::InvalidArgument, {}};
+        if (value.size() > MaxBytes) return {CredentialStatus::Limit, {}};
+        if (!available()) {
+            // Recovery journals must survive a restart even without a keyring;
+            // this is the one sanctioned 0600-file path.
+            return FileStore::write(key, value);
+        }
+        QMutexLocker guard(&mutex);
+        const auto stored = keyringWrite(key, value);
+        if (stored.succeeded()) {
+            session.remove(key);
+            FileStore::remove(key);
+            return stored;
+        }
+        if (stored.status == CredentialStatus::Locked || stored.status == CredentialStatus::Cancelled
+            || stored.status == CredentialStatus::PermissionDenied)
+            return stored;
+        // Degraded keyring: journals keep their durable 0600-file copy.
         return FileStore::write(key, value);
     }
     CredentialResult remove(const QString &key) override {
         if (!validKey(key)) return {CredentialStatus::InvalidArgument, {}};
-        if (!available()) return FileStore::remove(key) ? CredentialResult{CredentialStatus::Success, {}}
-            : CredentialResult{CredentialStatus::NotFound, {}};
         QMutexLocker guard(&mutex);
+        const auto sessionRemoved = session.remove(key);
+        if (!available()) return (sessionRemoved || FileStore::remove(key)) ? CredentialResult{CredentialStatus::Success, {}}
+            : CredentialResult{CredentialStatus::NotFound, {}};
         GErrorMirror *error = nullptr;
         char *present = lookup(&schema, nullptr, &error, "service", ServiceAttribute,
             "account", key.toUtf8().constData(), static_cast<const char *>(nullptr));
@@ -149,13 +199,28 @@ public:
         }
         const auto mapped = mapError(error);
         const auto release = qScopeGuard([&] { if (error) errorFree(error); });
-        if (FileStore::remove(key)) return {CredentialStatus::Success, {}};
+        // The key may have lived only in this session's memory (no usable
+        // keyring) or in the file copy of an earlier release.
+        if (sessionRemoved || FileStore::remove(key)) return {CredentialStatus::Success, {}};
         // Repeat deletion reports absence even when the keyring itself is unreachable.
         if (mapped != CredentialStatus::NotFound && mapped != CredentialStatus::Failed)
             return {mapped, {}, error ? qint64(error->code) : 0};
         return {CredentialStatus::NotFound, {}};
     }
 private:
+    // Store into the keyring when usable; callers decide the weaker-storage
+    // policy for the mapped refusal and unavailability outcomes. The mutex must
+    // be held.
+    CredentialResult keyringWrite(const QString &key, const QByteArray &value) {
+        GErrorMirror *error = nullptr;
+        const auto encoded = QByteArray("b64:" + value.toBase64());
+        const auto stored = store(&schema, nullptr, SecretLabel, encoded.constData(), nullptr, &error,
+            "service", ServiceAttribute, "account", key.toUtf8().constData(), static_cast<const char *>(nullptr));
+        const auto release = qScopeGuard([&] { if (error) errorFree(error); });
+        if (stored) return {CredentialStatus::Success, {}};
+        const auto mapped = mapError(error);
+        return {mapped, {}, error ? qint64(error->code) : 0};
+    }
     bool available() const { return schema.name && secretDomain; }
     CredentialStatus mapError(const GErrorMirror *error) const {
         if (!error) return CredentialStatus::NotFound;
@@ -170,6 +235,9 @@ private:
         return CredentialStatus::Failed;
     }
     QMutex mutex;
+    // Secrets from this session when the keyring could not store them; never
+    // spilled to disk, never visible to other processes.
+    QHash<QString, QByteArray> session;
     QLibrary library, glib;
     StoreFn store = nullptr;
     LookupFn lookup = nullptr;

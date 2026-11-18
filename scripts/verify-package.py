@@ -285,17 +285,13 @@ def linux_audit(files, root, arch, env):
         if unresolved:
             raise RuntimeError(f'Unresolved ELF dependencies: {path}: {unresolved}')
         evidence.append({'file': str(path.relative_to(root)), 'dependencies': dependencies})
-    for name in ('bin/qt.conf', 'libexec/QtWebEngineProcess', 'resources/icudtl.dat',
-                 'resources/qtwebengine_resources.pak', 'translations/qtwebengine_locales'):
-        if not (root / name).exists():
-            raise RuntimeError(f'Missing QtWebEngine runtime component: {name}')
+    if not (root / 'bin/qt.conf').is_file():
+        raise RuntimeError('Missing packaged qt.conf')
     qt_conf = (root / 'bin/qt.conf').read_text(encoding='utf-8')
     for key in ('Prefix', 'Plugins', 'LibExecs', 'Data', 'Translations'):
         if not re.search(r'^' + key + r'\s*=', qt_conf, re.M):
             raise RuntimeError(f'Packaged qt.conf does not declare its {key} search path')
-    return {'files': evidence,
-            'qtwebengine': {'process': 'libexec/QtWebEngineProcess', 'resources': 'resources',
-                            'locales': 'translations/qtwebengine_locales'}}
+    return {'files': evidence}
 
 
 def windows_signature(path):
@@ -354,7 +350,7 @@ def check_signin_browser(root, executable, probe, env):
             run(installed_probe, cwd=working, env=probe_env, timeout=30)
         finally:
             installed_probe.unlink()
-    return {'win32': 'WebView2', 'linux': 'QtWebEngine'}.get(sys.platform, 'WKWebView')
+    return {'win32': 'WebView2', 'linux': 'WebKitGTK'}.get(sys.platform, 'WKWebView')
 
 
 def verify(root, executable, revision, application_version, output, archive, browser_probe=None):
@@ -385,12 +381,12 @@ def verify(root, executable, revision, application_version, output, archive, bro
     if system == 'windows' and not (data / 'licenses/LICENSE.WebView2').is_file():
         raise RuntimeError('Missing WebView2 loader license')
     files = []
-    # Linux packages bundle QtWebEngine (the sign-in browser); other platforms must not.
-    webengine_bundle = system == 'linux'
+    # No shipped platform bundles a browser runtime: Windows and macOS use the
+    # system WebView2/WKWebView, and the Linux sign-in browser is WebKitGTK.
     for path in root.rglob('*'):
         if system == 'windows' and path.name.casefold() == 'qtuiotouchplugin.dll':
             raise RuntimeError(f'Unused TUIO plugin in package: {path}')
-        if not webengine_bundle and ('webengine' in path.name.casefold() or path.name.casefold() == 'icudtl.dat'):
+        if 'webengine' in path.name.casefold() or path.name.casefold() == 'icudtl.dat':
             raise RuntimeError(f'Obsolete bundled browser in package: {path}')
         if (path.name.casefold() in ('zju-connect', 'zju-connect.exe', 'core-provenance')
                 or (path.name.casefold() == WINDOWS_HELPER['driver_library'].casefold()

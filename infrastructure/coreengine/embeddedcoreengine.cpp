@@ -109,7 +109,9 @@ QByteArray configurationBytes(const ConnectionOptions &connectionOptions, CoreEn
 }
 QJsonObject coreObject(const QByteArray &bytes, uint32_t length) {
     if (length > uint32_t(bytes.size())) return {};
-    return QJsonValue::fromJson(QByteArrayView(bytes.constData(), length)).toObject();
+    // QJsonValue::fromJson needs Qt 6.9; a document parses a bare JSON object
+    // and yields {} for arrays and scalars, matching the previous behavior.
+    return QJsonDocument::fromJson(QByteArray::fromRawData(bytes.constData(), int(length))).object();
 }
 ConnectionError connectionError(int status) {
     if (status == JC_OK || status == JC_CANCELLED) return ConnectionError::NONE;
