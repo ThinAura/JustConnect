@@ -30,7 +30,20 @@ type tunDevice struct {
 	local netip.Addr
 	peer  netip.Addr
 	mtu   int
-	nl    *netlinkConn
+	nl    netlinkMutator
+}
+
+// netlinkMutator is the device-facing subset of the NETLINK_ROUTE connection.
+// The indirection lets unit tests fake the kernel side (route failures,
+// sweep verification) without a real TUN device.
+type netlinkMutator interface {
+	linkSetMTUUp(index, mtu int) error
+	addAddress(index int, local, peer netip.Addr) error
+	addRoute(index int, prefix netip.Prefix) error
+	delRoute(index int, prefix netip.Prefix) error
+	sweepRoutes(index int) error
+	delAddress(index int, local, peer netip.Addr) error
+	linkDown(index int) error
 }
 
 // openTUN creates a fresh nonpersistent TUN device. The kernel chooses the
@@ -157,10 +170,10 @@ func (d *tunDevice) withdraw() error {
 }
 
 func (d *tunDevice) close() {
-	if d.nl != nil {
-		d.nl.close()
-		d.nl = nil
+	if conn, ok := d.nl.(*netlinkConn); ok {
+		conn.close()
 	}
+	d.nl = nil
 	if d.fd >= 0 {
 		unix.Close(d.fd)
 		d.fd = -1
@@ -336,6 +349,22 @@ func routePayload(dstLen, table byte) []byte {
 	return rt[:]
 }
 
+// deleteRoutePayload frames an RTM_DELROUTE request. Deletion must not constrain
+// protocol, scope or type: the kernel-owned connected routes of the point-to-point
+// address pair (RTPROT_KERNEL, scope host, RTN_LOCAL) describe the same
+// destination and interface as the helper-installed campus routes with entirely
+// different metadata, and fib_table_delete only matches a field the request
+// actually sets. Leaving them unspecified deletes any route with the same
+// destination, table and interface — every route this sweep owns.
+func deleteRoutePayload(dstLen, table byte) []byte {
+	var rt [12]byte
+	rt[0] = unix.AF_INET
+	rt[1] = dstLen
+	rt[4] = table
+	rt[6] = unix.RT_SCOPE_NOWHERE
+	return rt[:]
+}
+
 func (c *netlinkConn) addRoute(index int, prefix netip.Prefix) error {
 	attrs := append(ip4attr(unix.RTA_DST, prefix.Addr()),
 		u32attr(unix.RTA_OIF, uint32(index))...)
@@ -353,7 +382,7 @@ func (c *netlinkConn) delRoute(index int, prefix netip.Prefix) error {
 	attrs := append(ip4attr(unix.RTA_DST, prefix.Addr()),
 		u32attr(unix.RTA_OIF, uint32(index))...)
 	msg := netlinkMessage(unix.RTM_DELROUTE, unix.NLM_F_REQUEST|unix.NLM_F_ACK, c.nextSeq(),
-		routePayload(byte(prefix.Bits()), unix.RT_TABLE_MAIN), attrs)
+		deleteRoutePayload(byte(prefix.Bits()), unix.RT_TABLE_MAIN), attrs)
 	err := c.transact("route del "+prefix.String(), msg)
 	return tolerateMissingRoute(err)
 }
@@ -435,7 +464,7 @@ func (c *netlinkConn) sweepRoutes(index int) error {
 			}
 			attrs = append(attrs, u32attr(unix.RTA_OIF, uint32(index))...)
 			msg := netlinkMessage(unix.RTM_DELROUTE, unix.NLM_F_REQUEST|unix.NLM_F_ACK, c.nextSeq(),
-				routePayload(target.dstLen, target.table), attrs)
+				deleteRoutePayload(target.dstLen, target.table), attrs)
 			if err := tolerateMissingRoute(c.transact("route sweep", msg)); err != nil {
 				return err
 			}

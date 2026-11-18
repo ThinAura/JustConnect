@@ -42,6 +42,9 @@
 /build-deb/
 /justconnect_*-1_amd64.deb
 
+# Go helper build output
+/infrastructure/networkhelper/linux/helper/helper
+
 # CLion
 /.idea
 

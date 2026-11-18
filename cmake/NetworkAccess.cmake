@@ -11,6 +11,7 @@ function(justconnect_network_access TARGET PLATFORM)
         set(NETWORK_ACCESS_SOURCES
             "${REPO}/infrastructure/networkhelper/linux/networkhelperpreparation.cpp"
             "${REPO}/infrastructure/networkhelper/linux/networkownership.cpp"
+            "${REPO}/infrastructure/networkaccess/linux/networkmonitor.cpp"
             "${REPO}/infrastructure/networkaccess/linux/networkaccess.cpp")
     endif()
     add_library(${TARGET} STATIC ${NETWORK_ACCESS_SOURCES})

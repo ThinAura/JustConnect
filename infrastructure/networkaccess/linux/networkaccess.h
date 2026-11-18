@@ -1,10 +1,12 @@
 #pragma once
 #include "application/connectionsession.h"
 #include "application/networkpolicysession.h"
+#include "infrastructure/networkaccess/linux/networkmonitor.h"
 #include "infrastructure/networkhelper/linux/networkhelperclient.h"
 #include "infrastructure/networkhelper/linux/networkhelperpreparation.h"
 #include <QFutureWatcher>
 #include <QLockFile>
+#include <QTimer>
 
 // Automatic (TUN) network access on Linux through the privileged helper:
 // pkexec authorizes one helper process per application launch, the helper
@@ -32,12 +34,13 @@ private:
     int mtu = 0;
     LinuxNetworkHelperClient helper;
     QFutureWatcher<LinuxHelperPreparation> worker;
+    LinuxNetworkMonitor *monitor = nullptr;
     std::unique_ptr<QLockFile> lock;
     QUuid attempt;
     QString generation, localDNS;
     QJsonObject changingPolicy, originalExit;
     QStringList nextCapture;
     Stage stage = Stage::Idle;
-    QTimer observation;
+    QTimer restoreRetry;
     bool preparing = false, attaching = false, automaticPolicy = false;
 };

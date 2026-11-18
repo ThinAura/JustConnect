@@ -1,5 +1,6 @@
 #include "infrastructure/networkhelper/linux/networkhelperclient.h"
 #include "infrastructure/networkhelper/linux/networkhelperavailability.h"
+#include <QJsonDocument>
 #include <QRandomGenerator>
 #include <QSocketNotifier>
 #include <QStandardPaths>
@@ -375,7 +376,13 @@ void LinuxNetworkHelperClient::handleReply(const QJsonObject &packet)
         ownedDevice_.reset();
         ownedConfiguration_.reset();
         closeFd(descriptor_);
-        setState(State::Idle);
+        // A failed restore retains the helper's ownership record: the capture
+        // stays attached and only a retried restore over the same channel can
+        // withdraw it. Returning to the active state keeps that retry possible;
+        // dropping to Idle here would leave every later apply answered with
+        // "a capture is already active" until the helper process restarts.
+        setState(!result->succeeded() && result->status != PlatformOperationResult::Status::Cancelled
+            ? State::Active : State::Idle);
         emit finished(operation, *result);
         return;
     case State::Idle:

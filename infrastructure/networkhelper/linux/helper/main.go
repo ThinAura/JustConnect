@@ -26,6 +26,16 @@ var (
 	sourceState = "unknown"
 )
 
+// Test seams: unit tests substitute a fake device and a no-op configuration
+// because /dev/net/tun is unavailable in test environments.
+var (
+	openTUNFn      = openTUN
+	configureTUNFn = func(d *tunDevice, local, peer netip.Addr, mtu int) error {
+		return d.configure(local, peer, mtu)
+	}
+	applyDNSFn = applyDNS
+)
+
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		report, err := json.Marshal(map[string]any{
@@ -77,16 +87,11 @@ func run(socketName, pidArg, uidArg string) error {
 	defer lock.Close()
 
 	// A previous helper may have died without restoring; clean its record
-	// before serving so this instance starts from a clean slate.
-	if state, err := loadState(uid); err != nil {
-		fmt.Fprintf(os.Stderr, "justconnect-network-helper: read leftover state: %v\n", err)
-	} else if state != nil {
-		if err := withdrawRecordedState(state); err != nil {
-			fmt.Fprintf(os.Stderr, "justconnect-network-helper: leftover restore: %v\n", err)
-		}
-		if err := clearState(uid); err != nil {
-			fmt.Fprintf(os.Stderr, "justconnect-network-helper: clear leftover state: %v\n", err)
-		}
+	// before serving so this instance starts from a clean slate. A failed
+	// cleanup keeps the record and aborts: the application must not open a
+	// new connection until the system is restored.
+	if err := recoverLeftoverState(uid); err != nil {
+		return err
 	}
 
 	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
@@ -141,6 +146,37 @@ func run(socketName, pidArg, uidArg string) error {
 		}
 	}
 	return err
+}
+
+// recoverLeftoverState withdraws everything a previous (crashed) helper
+// instance recorded and clears the record. It keeps the record and fails when
+// the restoration is incomplete so a new connection stays blocked until the
+// system is actually restored.
+func recoverLeftoverState(uid int) error {
+	state, err := loadState(uid)
+	if err != nil {
+		return fmt.Errorf("read leftover state: %w", err)
+	}
+	if state == nil {
+		return nil
+	}
+	if err := withdrawRecordedState(state); err != nil {
+		return fmt.Errorf("restore the state recorded by the previous helper: %w", err)
+	}
+	if err := clearState(uid); err != nil {
+		return fmt.Errorf("clear leftover state: %w", err)
+	}
+	return nil
+}
+
+// recoverLeftoverForSession runs the same cleanup for a running session whose
+// apply was refused or whose record was retained; probe reports the DNS mode
+// only once the system is clean.
+func (s *helperSession) recoverLeftoverForSession() error {
+	if s.state != nil {
+		return nil
+	}
+	return recoverLeftoverState(s.uid)
 }
 
 // helperSession owns at most one capture for the connected application.
@@ -202,6 +238,13 @@ func (s *helperSession) dispatch(request *request) (reply *response, attachFD in
 	attachFD = -1
 	switch request.Operation {
 	case opProbe:
+		// A retained record from an earlier refused or crashed session must
+		// be cleaned before this session can use the host again; a failed
+		// cleanup keeps blocking new connections.
+		if err := s.recoverLeftoverForSession(); err != nil {
+			reply = request.reply(statusFailed, err.Error(), nil)
+			break
+		}
 		mode, err := detectDNSMode()
 		reply = request.reply(statusOK, "", nil)
 		if err != nil {
@@ -252,6 +295,13 @@ func (s *helperSession) apply(request *request) (*deviceInfo, int, error) {
 	if s.state != nil || s.dev != nil {
 		return nil, -1, errors.New("a capture is already active; restore it before applying again")
 	}
+	// A retained record from an earlier failure describes mutations that may
+	// still be live; refuse to overwrite it (the probe cleans it up first).
+	if leftover, err := loadState(s.uid); err != nil {
+		return nil, -1, fmt.Errorf("read the previous ownership record: %w", err)
+	} else if leftover != nil {
+		return nil, -1, errors.New("a previous session left an uncleaned ownership record; clean it up first")
+	}
 	config, err := request.configuration()
 	if err != nil {
 		return nil, -1, err
@@ -289,36 +339,59 @@ func (s *helperSession) apply(request *request) (*deviceInfo, int, error) {
 		}
 	}
 
-	dev, err := openTUN()
+	dev, err := openTUNFn()
 	if err != nil {
 		return nil, -1, err
 	}
 	device := &deviceInfo{Name: dev.name, Index: dev.index, MTU: config.MTU,
 		Address: config.Address, Peer: config.Peer}
-	fail := func(err error) (*deviceInfo, int, error) {
-		dev.withdraw()
-		clearState(s.uid)
-		return nil, -1, err
-	}
-
-	if err := dev.configure(local, peer, config.MTU); err != nil {
-		return fail(err)
-	}
-
 	// Write-ahead the ownership record before any mutation that can outlive
 	// this process (DNS edits and routes).
 	state := &ownedState{Version: stateVersion, UID: s.uid, PID: s.pid, Device: device}
+	// Every failure after this point must withdraw the device and the DNS
+	// changes. A failed DNS withdrawal retains the ownership record (the
+	// state file stays) so the cleanup can be retried and a fresh connection
+	// stays blocked until it succeeds.
+	fail := func(err error) (*deviceInfo, int, error) {
+		if dnsErr := withdrawDNS(state.DNS); dnsErr != nil {
+			err = fmt.Errorf("%w; restore DNS also failed: %v", err, dnsErr)
+			// Re-publish the record (device and DNS ownership) so the next
+			// helper instance or a retry can finish the cleanup.
+			state.Prefixes = nil
+			if saveErr := saveState(state); saveErr != nil {
+				err = fmt.Errorf("%w; retaining the recovery record failed: %v", err, saveErr)
+			}
+		} else if clearErr := clearState(s.uid); clearErr != nil {
+			err = fmt.Errorf("%w; clearing the ownership record failed: %v", err, clearErr)
+		}
+		if devErr := dev.withdraw(); devErr != nil {
+			err = fmt.Errorf("%w; withdrawing the device also failed: %v", err, devErr)
+		}
+		return nil, -1, err
+	}
+
+	if err := configureTUNFn(dev, local, peer, config.MTU); err != nil {
+		return fail(err)
+	}
+
 	if err := saveState(state); err != nil {
 		return fail(err)
 	}
 
 	if dnsMode != dnsModeSkipped {
-		ownership, err := applyDNS(dnsMode, dev.name, config.Peer, config.Domains)
+		// Record the complete DNS ownership intent (file path, inserted
+		// line, pre-connection nameservers) before mutating anything: a
+		// crash after the record but before the edit — or during it — is
+		// then still restorable by the next helper instance.
+		ownership, err := planDNS(dnsMode, dev.name, config.Peer, config.Domains)
 		if err != nil {
 			return fail(err)
 		}
 		state.DNS = ownership
 		if err := saveState(state); err != nil {
+			return fail(err)
+		}
+		if err := applyDNSFn(ownership); err != nil {
 			return fail(err)
 		}
 	}
@@ -431,7 +504,9 @@ func (s *helperSession) reconcile(request *request) error {
 }
 
 // restore withdraws the whole capture: DNS, routes, addresses, up flag. It is
-// idempotent and safe to call repeatedly.
+// idempotent and safe to call repeatedly. When a step fails, the ownership
+// record is retained so the cleanup can be retried — and so the next helper
+// instance can finish withdrawing whatever outlived this process.
 func (s *helperSession) restore() error {
 	state := s.state
 	if state == nil {
@@ -450,6 +525,14 @@ func (s *helperSession) restore() error {
 		} else if err := withdrawRecordedState(state); err != nil {
 			problems = append(problems, err.Error())
 		}
+	}
+	if len(problems) > 0 {
+		// Retain the record: a later restore — or the next helper instance
+		// recovering the leftover state — must still see what remains.
+		if err := saveState(state); err != nil {
+			problems = append(problems, err.Error())
+		}
+		return errors.New(strings.Join(problems, "; "))
 	}
 	s.state = nil
 	if err := clearState(s.uid); err != nil {

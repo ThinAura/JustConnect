@@ -1,4 +1,5 @@
 #include "infrastructure/networkaccess/linux/networkaccess.h"
+#include "infrastructure/networkaccess/linux/networkmonitor.h"
 #include "infrastructure/networkhelper/linux/networkhelperavailability.h"
 #include "infrastructure/networkhelper/linux/networkownership.h"
 #include "application/campuscapture.h"
@@ -24,7 +25,7 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
     });
     connect(&helper, &LinuxNetworkHelperClient::ownershipLost, this, [this](Result result) {
         if (stage == Stage::Ready || stage == Stage::Updating) {
-            observation.stop(); stage = Stage::Prepared; emit lost(attempt, result);
+            stage = Stage::Prepared; emit lost(attempt, result);
         }
     });
     new DNSRoutePublisher<LinuxNetworkHelperClient>(core, &helper, this, [this] { return stage == Stage::Ready; },
@@ -34,8 +35,20 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
         });
     connect(policy, &NetworkPolicySession::changed, this, &LinuxNetworkAccess::prepareConfiguration);
     connect(policy, &NetworkPolicySession::changed, this, &LinuxNetworkAccess::observeModel, Qt::QueuedConnection);
-    observation.setInterval(2000);
-    connect(&observation, &QTimer::timeout, this, [this] { if (stage == Stage::Ready && !this->policy->isBusy()) this->policy->refresh(); });
+    // Event-driven original-network observation: kernel link/address/route
+    // notifications plus resolver file edits request exactly one full
+    // snapshot per change; an unchanged connection requests none.
+    monitor = new LinuxNetworkMonitor(-1, this);
+    connect(monitor, &LinuxNetworkMonitor::networkChanged, this, [this, policy] {
+        if (stage == Stage::Ready && !policy->isBusy()) policy->refresh();
+    });
+    // A failed restore keeps the helper's ownership record; the session stays
+    // in Stopping and retries the cleanup until it succeeds, which blocks a
+    // new connection in the meantime.
+    restoreRetry.setSingleShot(true);
+    connect(&restoreRetry, &QTimer::timeout, this, [this] {
+        if (stage == Stage::Stopping && helper.state() == HelperState::Active) helper.restore();
+    });
     connect(&worker, &QFutureWatcher<LinuxHelperPreparation>::finished, this, [this] {
         preparing = false;
         if (stage == Stage::Stopping) { driveStop(); return; }
@@ -55,7 +68,7 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
         }
         stage = Stage::Ready;
         this->policy->setPolicyApplier(generation, [this](const QJsonObject &value) { applyPolicy(value); });
-        observation.start(); emit ready(attempt, {});
+        emit ready(attempt, {});
     });
     connect(core, &CoreEngine::policyUpdated, this, [this](const QString &id, const QString &revision, CoreEngine::RequestStatus status) {
         if (stage != Stage::Updating || id != generation || revision != changingPolicy["revision"].toString()) return;
@@ -152,12 +165,12 @@ void LinuxNetworkAccess::helperFinished(Operation operation, Result result)
         changingPolicy = {}; nextCapture.clear(); automaticPolicy = false;
         stage = result.succeeded() ? Stage::Ready : Stage::Prepared;
         policy->setNetworkBusy(generation, false);
-        if (!result.succeeded()) { observation.stop(); emit lost(attempt, result); }
+        if (!result.succeeded()) { emit lost(attempt, result); }
         policy->completePolicy(generation, revision, result.succeeded() ? CoreEngine::RequestStatus::Success : CoreEngine::RequestStatus::Failed);
         return;
     }
     if ((operation == Operation::Extend || operation == Operation::Routes) && stage == Stage::Ready) {
-        if (!result.succeeded()) { stage = Stage::Prepared; observation.stop(); emit lost(attempt, result); }
+        if (!result.succeeded()) { stage = Stage::Prepared; emit lost(attempt, result); }
         return;
     }
     if (stage == Stage::Activating && operation == Operation::Apply) {
@@ -170,18 +183,18 @@ void LinuxNetworkAccess::observeModel()
 {
     if (stage != Stage::Ready || generation != policy->currentGeneration() || automaticPolicy || policy->isBusy()) return;
     if (policy->status() != CoreEngine::RequestStatus::Success) {
-        stage = Stage::Prepared; observation.stop(); emit lost(attempt, {Status::Failed, QStringLiteral("Cannot completely read the original network (%1); restoring ownership.")
+        stage = Stage::Prepared; emit lost(attempt, {Status::Failed, QStringLiteral("Cannot completely read the original network (%1); restoring ownership.")
             .arg(policy->failureDetail().isEmpty() ? QStringLiteral("reason unavailable") : policy->failureDetail()), true}); return;
     }
     const auto model = policy->model();
     const auto exit = originalExitSnapshot(model["network"].toObject(), model["resources"].toObject()["underlay_interface"].toString());
     const auto owned = helper.ownedConfiguration();
     if (!exit || *exit != originalExit || (owned && !linuxOriginalDnsMatches(*owned, helper.dnsMode(), model["dns"].toObject()))) {
-        stage = Stage::Prepared; observation.stop(); emit restartRequired(attempt, QStringLiteral("Original network exit changed; restoring before reconnecting.")); return;
+        stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Original network exit changed; restoring before reconnecting.")); return;
     }
     const auto update = owned ? updatedLinuxCapturePrefixes(model["resources"].toObject(), policy->confirmedProtection(), *owned,
         model["network"].toObject(), model["dns"].toObject()) : std::nullopt;
-    if (!update) { stage = Stage::Prepared; observation.stop(); emit restartRequired(attempt, QStringLiteral("Original DNS or campus scope changed; restoring before reconnecting.")); return; }
+    if (!update) { stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Original DNS or campus scope changed; restoring before reconnecting.")); return; }
     auto actual = owned->capturePrefixes, expected = *update; actual.sort(); expected.sort();
     if (actual != expected) { helper.reconcile(*update); return; }
     automaticPolicy = true;
@@ -189,7 +202,7 @@ void LinuxNetworkAccess::observeModel()
     if (result == CoreEngine::RequestStatus::Pending) return;
     automaticPolicy = false;
     if (result != CoreEngine::RequestStatus::Success) {
-        stage = Stage::Prepared; observation.stop(); emit restartRequired(attempt, QStringLiteral("Cannot confirm original-network protection; restoring ownership."));
+        stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Cannot confirm original-network protection; restoring ownership."));
     }
 }
 
@@ -202,7 +215,7 @@ void LinuxNetworkAccess::applyPolicy(const QJsonObject &value)
     if (stage != Stage::Ready || helper.state() != HelperState::Active || !update) {
         const bool automatic = automaticPolicy; automaticPolicy = false;
         policy->completePolicy(value["generation"].toString(), value["revision"].toString(), CoreEngine::RequestStatus::Unavailable);
-        if (automatic) { stage = Stage::Prepared; observation.stop(); emit restartRequired(attempt, QStringLiteral("Cannot apply updated network protection; restoring before reconnecting.")); }
+        if (automatic) { stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Cannot apply updated network protection; restoring before reconnecting.")); }
         return;
     }
     changingPolicy = value; nextCapture = *update; stage = Stage::Updating;
@@ -216,7 +229,7 @@ void LinuxNetworkAccess::finishPolicy(CoreEngine::RequestStatus status)
     changingPolicy = {}; nextCapture.clear(); automaticPolicy = false; stage = Stage::Ready;
     policy->setNetworkBusy(generation, false); policy->completePolicy(generation, revision, status);
     if (automatic && status != CoreEngine::RequestStatus::Success && stage == Stage::Ready) {
-        stage = Stage::Prepared; observation.stop(); emit restartRequired(attempt, QStringLiteral("Cannot confirm updated network protection; restoring before reconnecting."));
+        stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Cannot confirm updated network protection; restoring before reconnecting."));
     }
 }
 
@@ -224,7 +237,7 @@ void LinuxNetworkAccess::stop(const QUuid &id)
 {
     if (id != attempt) { emit stopped(id, {Status::Failed, QStringLiteral("Recovery request does not belong to the current connection."), true}); return; }
     if (stage == Stage::Stopping) return;
-    observation.stop(); stage = Stage::Stopping; driveStop();
+    stage = Stage::Stopping; driveStop();
 }
 
 void LinuxNetworkAccess::driveStop()

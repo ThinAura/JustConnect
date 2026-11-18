@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -34,13 +35,18 @@ const (
 	dnsModeResolved = "resolved"
 	dnsModeFile     = "file"
 
-	resolvConfPath   = "/etc/resolv.conf"
 	resolvedStubLine = "nameserver 127.0.0.53"
 	resolvedRunDir   = "/run/systemd/resolve"
 )
 
+// Var instead of const so tests can relocate the file.
+var resolvConfPath = "/etc/resolv.conf"
+
 // dnsOwnership records exactly what was mutated so the session can withdraw
 // it later, including after a helper restart (the state file keeps it).
+// planDNS computes the whole record before applyDNS touches anything, so the
+// write-ahead state file always describes a mutation that is either not yet
+// made or fully withdrawable.
 type dnsOwnership struct {
 	Mode       string   `json:"mode"`
 	Iface      string   `json:"interface,omitempty"`
@@ -48,6 +54,10 @@ type dnsOwnership struct {
 	Domains    []string `json:"domains,omitempty"`
 	ResolvPath string   `json:"resolv_path,omitempty"`
 	Inserted   string   `json:"inserted,omitempty"`
+	// Original lists the nameserver entries the file carried before the
+	// capture inserted its own; restore re-adds any entry something else
+	// removed while the capture owned the file.
+	Original []string `json:"original,omitempty"`
 }
 
 // detectDNSMode decides which DNS mechanism this host offers, or fails with a
@@ -83,8 +93,38 @@ func detectDNSModeAt(resolvPath string) (string, error) {
 	return dnsModeFile, nil
 }
 
-// applyDNS installs campus DNS on the freshly configured TUN interface.
-func applyDNS(mode, iface, peer string, domains []string) (*dnsOwnership, error) {
+// applyDNS installs campus DNS from a plan produced by planDNS.
+func applyDNS(ownership *dnsOwnership) error {
+	switch ownership.Mode {
+	case dnsModeResolved:
+		if err := runCommand("resolvectl", "dns", ownership.Iface, ownership.Peer); err != nil {
+			return fmt.Errorf("set per-link DNS server: %w", err)
+		}
+		args := []string{"domain", ownership.Iface}
+		for _, domain := range ownership.Domains {
+			args = append(args, "~"+domain)
+		}
+		if err := runCommand("resolvectl", args...); err != nil {
+			// Withdraw the half-applied per-link settings.
+			_ = runCommand("resolvectl", "revert", ownership.Iface)
+			return fmt.Errorf("set per-link routing domains: %w", err)
+		}
+	case dnsModeFile:
+		// Domains need no installation here: glibc-class resolvers try the
+		// first nameserver for every query and fall through on REFUSED.
+		if _, err := insertResolvNameserverAt(ownership.ResolvPath, ownership.Inserted); err != nil {
+			return fmt.Errorf("update %s: %w", ownership.ResolvPath, err)
+		}
+	default:
+		return fmt.Errorf("unsupported DNS mode %q", ownership.Mode)
+	}
+	return nil
+}
+
+// planDNS computes the complete ownership record — including the exact file
+// path, the line to insert, and the nameserver entries already present —
+// without mutating anything. applyDNS later executes this plan.
+func planDNS(mode, iface, peer string, domains []string) (*dnsOwnership, error) {
 	ownership := &dnsOwnership{
 		Mode:    mode,
 		Iface:   iface,
@@ -93,36 +133,31 @@ func applyDNS(mode, iface, peer string, domains []string) (*dnsOwnership, error)
 	}
 	switch mode {
 	case dnsModeResolved:
-		if err := runCommand("resolvectl", "dns", iface, peer); err != nil {
-			return nil, fmt.Errorf("set per-link DNS server: %w", err)
-		}
-		args := []string{"domain", iface}
-		for _, domain := range domains {
-			args = append(args, "~"+domain)
-		}
-		if err := runCommand("resolvectl", args...); err != nil {
-			// Withdraw the half-applied per-link settings.
-			_ = runCommand("resolvectl", "revert", iface)
-			return nil, fmt.Errorf("set per-link routing domains: %w", err)
-		}
+		return ownership, nil
 	case dnsModeFile:
 		// Domains need no installation here: glibc-class resolvers try the
 		// first nameserver for every query and fall through on REFUSED.
-		line := "nameserver " + peer
-		path, err := insertResolvNameserver(line)
+		real, err := filepath.EvalSymlinks(resolvConfPath)
 		if err != nil {
-			return nil, fmt.Errorf("update %s: %w", resolvConfPath, err)
+			return nil, fmt.Errorf("resolve %s: %w", resolvConfPath, err)
 		}
-		ownership.ResolvPath = path
-		ownership.Inserted = line
+		data, err := os.ReadFile(real)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", real, err)
+		}
+		ownership.ResolvPath = real
+		ownership.Inserted = "nameserver " + peer
+		ownership.Original = resolvNameserverEntries(data)
+		return ownership, nil
 	default:
 		return nil, fmt.Errorf("unsupported DNS mode %q", mode)
 	}
-	return ownership, nil
 }
 
 // withdrawDNS undoes applyDNS. Best effort: a vanished interface already
 // released its per-link settings, and a missing resolv.conf needs no edit.
+// Any recorded pre-connection nameserver entry that disappeared while the
+// capture owned the file is restored.
 func withdrawDNS(ownership *dnsOwnership) error {
 	if ownership == nil || ownership.Mode == dnsModeSkipped {
 		return nil
@@ -136,7 +171,10 @@ func withdrawDNS(ownership *dnsOwnership) error {
 		}
 	case dnsModeFile:
 		if err := removeResolvNameserver(ownership.ResolvPath, ownership.Inserted); err != nil {
-			return fmt.Errorf("restore %s: %w", resolvConfPath, err)
+			return fmt.Errorf("restore %s: %w", ownership.ResolvPath, err)
+		}
+		if err := restoreResolvNameservers(ownership.ResolvPath, ownership.Original); err != nil {
+			return fmt.Errorf("restore original nameservers in %s: %w", ownership.ResolvPath, err)
 		}
 	}
 	return nil
@@ -146,6 +184,17 @@ func ifaceExists(name string) bool {
 	_, err := os.Stat(filepath.Join("/sys/class/net", name))
 	return err == nil
 }
+
+// staticFileInfo satisfies os.FileInfo for files writeResolvFile creates
+// fresh; Sys() reports no owner, so the file keeps the helper's identity.
+type staticFileInfo struct{ mode os.FileMode }
+
+func (s staticFileInfo) Name() string       { return "resolv.conf" }
+func (s staticFileInfo) Size() int64        { return 0 }
+func (s staticFileInfo) Mode() os.FileMode  { return s.mode }
+func (s staticFileInfo) ModTime() time.Time { return time.Time{} }
+func (s staticFileInfo) IsDir() bool        { return false }
+func (s staticFileInfo) Sys() any           { return nil }
 
 func runCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
@@ -159,6 +208,54 @@ func runCommand(name string, args ...string) error {
 // resolvNameserverLines returns the file's logical lines.
 func resolvNameserverLines(data []byte) []string {
 	return strings.Split(string(data), "\n")
+}
+
+// resolvNameserverEntries returns the file's nameserver lines in order.
+func resolvNameserverEntries(data []byte) []string {
+	var entries []string
+	for _, line := range resolvNameserverLines(data) {
+		if strings.HasPrefix(strings.TrimSpace(line), "nameserver ") {
+			entries = append(entries, line)
+		}
+	}
+	return entries
+}
+
+// restoreResolvNameservers re-adds the recorded pre-connection nameserver
+// entries that vanished while the capture owned the file. Entries still
+// present — possibly reordered or mixed with new ones — are left untouched.
+func restoreResolvNameservers(path string, original []string) error {
+	if len(original) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		// The whole file vanished; recreate it from the recorded entries.
+		return writeResolvFile(path, strings.Join(original, "\n")+"\n", staticFileInfo{mode: 0o644})
+	}
+	lines := resolvNameserverLines(data)
+	present := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		present[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, entry := range original {
+		if !present[strings.TrimSpace(entry)] {
+			missing = append(missing, entry)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	updated := append(append([]string{}, missing...), lines...)
+	return writeResolvFile(path, strings.Join(updated, "\n"), info)
 }
 
 // insertResolvNameserver prepends one nameserver line to /etc/resolv.conf

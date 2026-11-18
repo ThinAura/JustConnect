@@ -78,7 +78,7 @@ function(justconnect_system_integration TARGET)
         target_link_libraries(${TARGET} PUBLIC justconnect_macos_network_helper
             PRIVATE "-framework Foundation" "-framework ServiceManagement" "-framework SystemConfiguration")
     else()
-        # gsettings and dconf are driven through the platform-neutral command runner.
+        # Proxy coexistence reads dconf through direct GSettings watches and writes through proxyapi.h.
         target_sources(${TARGET} PRIVATE "${REPO}/infrastructure/process/command.cpp"
             "${REPO}/infrastructure/dns/linux/dnssnapshot.cpp"
             "${REPO}/infrastructure/networkhelper/linux/networkhelperprotocol.cpp"
@@ -134,6 +134,16 @@ function(justconnect_system_integration_tests TARGET LIBRARY)
         target_link_libraries(networkhelper_linux_test PRIVATE ${LIBRARY} justconnect_application)
         add_test(NAME networkhelper_linux_test COMMAND networkhelper_linux_test)
         set_tests_properties(networkhelper_linux_test PROPERTIES TIMEOUT 60)
+        add_executable(proxychanges_linux_test "${REPO}/tests/platform/proxychanges_linux_test.cpp")
+        target_link_libraries(proxychanges_linux_test PRIVATE ${LIBRARY})
+        add_test(NAME proxychanges_linux_test COMMAND proxychanges_linux_test)
+        set_tests_properties(proxychanges_linux_test PROPERTIES TIMEOUT 10)
+        add_executable(networkmonitor_linux_test "${REPO}/tests/platform/networkmonitor_linux_test.cpp"
+            "${REPO}/infrastructure/networkaccess/linux/networkmonitor.cpp")
+        set_target_properties(networkmonitor_linux_test PROPERTIES AUTOMOC ON)
+        target_link_libraries(networkmonitor_linux_test PRIVATE ${LIBRARY})
+        add_test(NAME networkmonitor_linux_test COMMAND networkmonitor_linux_test)
+        set_tests_properties(networkmonitor_linux_test PROPERTIES TIMEOUT 20)
     endif()
     add_executable(proxyjournal_test "${REPO}/tests/platform/proxyjournal_test.cpp")
     target_link_libraries(proxyjournal_test PRIVATE ${LIBRARY})

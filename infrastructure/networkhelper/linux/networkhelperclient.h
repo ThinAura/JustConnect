@@ -3,6 +3,7 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QProcess>
+#include <QSocketNotifier>
 #include <QTimer>
 #include <functional>
 #include <memory>
