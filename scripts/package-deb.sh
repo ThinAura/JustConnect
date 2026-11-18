@@ -68,7 +68,7 @@ Architecture: amd64
 Maintainer: ThinAura <260574842+ThinAura@users.noreply.github.com>
 Installed-Size: $installed_size
 Depends: libdconf1, libqt6core6t64, libqt6dbus6, libqt6gui6, libqt6network6, libqt6svg6, libqt6widgets6, libsecret-1-0, libwebkit2gtk-4.1-0, pkexec, qt6-svg-plugins, qt6-wayland
-Recommends: fonts-dejavu-core
+Recommends: fonts-dejavu-core, systemd-resolved
 Section: net
 Priority: optional
 Homepage: https://github.com/wtalioy/JustConnect
