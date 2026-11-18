@@ -31,4 +31,6 @@ runs:
         aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
         py7zrversion: '==1.1.4'
         cache: true
-        cache-key-prefix: qt-6.12.0-widgets-v4-${{ inputs.host }}-${{ inputs.arch }}-${{ join(split(inputs.archives, ' '), '-') }}
+        # Actions expressions have no split(); distinguish the wider Linux archive
+        # set (it pulls qtwebchannel/qtwebengine) with a fixed suffix instead.
+        cache-key-prefix: qt-6.12.0-widgets-v4-${{ inputs.host }}-${{ inputs.arch }}-${{ contains(inputs.archives, 'qtwebengine') && 'webengine' || 'widgets' }}
