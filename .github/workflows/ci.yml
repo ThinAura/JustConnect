@@ -24,7 +24,7 @@ jobs:
         include:
           - {os: windows-2025, qt_host: windows, qt_arch: win64_msvc2022_64}
           - {os: macos-26, qt_host: mac, qt_arch: clang_64}
-          - {os: ubuntu-24.04, qt_host: linux, qt_arch: linux_gcc_x64}
+          - {os: ubuntu-24.04, qt_host: linux, qt_arch: linux_gcc_64}
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -56,6 +56,15 @@ jobs:
         run: |
           python scripts/test-corelib.py
           python -m unittest discover -s tests -p '*_test.py'
+
+      - name: Run Linux network helper tests
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+          GOTOOLCHAIN: local
+          GOWORK: 'off'
+        run: go -C infrastructure/networkhelper/linux/helper test -mod=readonly -count=1 -timeout 120s ./...
 
       - name: Configure
         shell: bash

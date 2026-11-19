@@ -61,14 +61,16 @@ grep -rq "$helper_path" "$stage/usr/bin/JustConnect" || { echo "application does
 installed_size="$(du -sk --apparent-size "$stage/usr" | cut -f1)"
 
 mkdir -p "$stage/DEBIAN"
+# The declared floors match the Debian 13 (trixie) libraries this package is
+# built against; the containerized clean-install check installs exactly these.
 cat > "$stage/DEBIAN/control" <<EOF
 Package: justconnect
 Version: $version
 Architecture: amd64
 Maintainer: ThinAura <260574842+ThinAura@users.noreply.github.com>
 Installed-Size: $installed_size
-Depends: libdconf1, libqt6core6t64, libqt6dbus6, libqt6gui6, libqt6network6, libqt6svg6, libqt6widgets6, libsecret-1-0, libwebkit2gtk-4.1-0, pkexec, qt6-svg-plugins, qt6-wayland
-Recommends: fonts-dejavu-core, systemd-resolved
+Depends: libdconf1 (>= 0.40.0), libqt6core6t64 (>= 6.8.2), libqt6dbus6 (>= 6.8.2), libqt6gui6 (>= 6.8.2), libqt6network6 (>= 6.8.2), libqt6svg6 (>= 6.8.2), libqt6widgets6 (>= 6.8.2), libsecret-1-0 (>= 0.21.7), libssl3t64 (>= 3.5.7), libwebkit2gtk-4.1-0 (>= 2.54.0), pkexec (>= 126), qt6-svg-plugins (>= 6.8.2), qt6-wayland (>= 6.8.2)
+Recommends: fonts-dejavu-core
 Section: net
 Priority: optional
 Homepage: https://github.com/wtalioy/JustConnect
@@ -88,5 +90,15 @@ EOF
 find "$stage/usr" -type d -exec chmod 0755 {} +
 chmod 0755 "$stage" "$stage/DEBIAN"
 chmod 0644 "$stage/DEBIAN/control" "$stage/DEBIAN/md5sums"
+
+# Release payloads carry no debug sections: the Go core's DWARF dominates the
+# installed size otherwise. --strip-debug keeps dynamic symbols (and the Go
+# runtime's pclntab), so the payload still launches against system libraries.
+if command -v strip >/dev/null; then
+    while IFS= read -r -d '' object; do
+        [ "$(head -c 4 "$object")" = $'\x7fELF' ] && strip --strip-debug "$object"
+    done < <(find "$stage/usr" -type f -print0)
+fi
+
 dpkg-deb --build --root-owner-group "$stage" "$output" 1>&2
 echo "$output"

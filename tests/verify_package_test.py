@@ -249,7 +249,7 @@ class VerifyPackageTest(unittest.TestCase):
                         package.check_signin_browser(root, probe, probe, {})
             self.assertEqual(list(root.glob('*.exe')), [probe])
 
-    def test_linux_browser_probe_runs_with_the_bundled_runtime(self):
+    def test_linux_browser_probe_runs_the_system_webkit_runtime(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             executable = root / 'bin' / 'JustConnect'
@@ -258,25 +258,31 @@ class VerifyPackageTest(unittest.TestCase):
             probe = Path(folder) / 'source-probe'
             probe.write_bytes(b'probe fixture')
             def run(*args, **kwargs):
+                if args[0] == 'xvfb-run':
+                    self.assertEqual(args[1], '-a')
+                    args = args[2:]
                 self.assertEqual(Path(args[0]).parent, executable.parent)
                 self.assertEqual(Path(args[0]).read_bytes(), probe.read_bytes())
                 self.assertNotEqual(Path(kwargs['cwd']), executable.parent)
                 env = kwargs['env']
                 self.assertEqual(env['QT_QPA_PLATFORM'], 'offscreen')
-                self.assertEqual(env['QTWEBENGINE_CHROMIUM_FLAGS'],
-                                 '--no-sandbox --disable-gpu --disable-dev-shm-usage')
+                self.assertNotIn('QTWEBENGINE_CHROMIUM_FLAGS', env)
                 self.assertNotIn('QT_QPA_PLATFORM_PLUGIN_PATH', env)
                 return ''
-            with patch.object(package.sys, 'platform', 'linux'), patch.object(package, 'run', side_effect=run):
-                self.assertEqual(package.check_signin_browser(root, executable, probe, {}), 'QtWebEngine')
+            with patch.object(package.sys, 'platform', 'linux'), \
+                    patch.object(package.shutil, 'which', return_value='/usr/bin/xvfb-run'), \
+                    patch.object(package, 'run', side_effect=run):
+                self.assertEqual(package.check_signin_browser(root, executable, probe, {}), 'WebKitGTK')
+            with patch.object(package.sys, 'platform', 'linux'), \
+                    patch.object(package.shutil, 'which', return_value=None), \
+                    patch.object(package, 'run', side_effect=run):
+                self.assertEqual(package.check_signin_browser(root, executable, probe, {}), 'WebKitGTK')
             self.assertEqual(list(executable.parent.glob('signin-browser-check-*')), [])
 
-    def test_linux_audit_requires_relocatable_bundled_qt_and_webengine(self):
+    def test_linux_audit_requires_relocatable_bundled_qt(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            for path in ('bin/JustConnect', 'bin/qt.conf', 'lib/libQt6Core.so.6', 'libexec/QtWebEngineProcess',
-                         'resources/icudtl.dat', 'resources/qtwebengine_resources.pak',
-                         'translations/qtwebengine_locales/en.pak'):
+            for path in ('bin/JustConnect', 'bin/qt.conf', 'lib/libQt6Core.so.6'):
                 destination = root / path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.touch()
@@ -307,8 +313,6 @@ class VerifyPackageTest(unittest.TestCase):
             audit = attempt()
             self.assertEqual(audit['files'][0]['dependencies'],
                              {'libQt6Core.so.6': 'lib/libQt6Core.so.6', 'libc.so.6': 'Linux system library'})
-            self.assertEqual(audit['qtwebengine'], {'process': 'libexec/QtWebEngineProcess', 'resources': 'resources',
-                                                    'locales': 'translations/qtwebengine_locales'})
             with self.subTest(case='wrong architecture'):
                 with self.assertRaisesRegex(RuntimeError, 'Wrong ELF architecture'):
                     attempt(arch='arm64')
@@ -324,14 +328,6 @@ class VerifyPackageTest(unittest.TestCase):
             with self.subTest(case='unresolved dependency'):
                 with self.assertRaisesRegex(RuntimeError, 'Unresolved ELF dependencies'):
                     attempt(ldd='libQt6Core.so.6 not found\n')
-            with self.subTest(case='missing webengine component'):
-                icudtl = root / 'resources/icudtl.dat'
-                icudtl.unlink()
-                try:
-                    with self.assertRaisesRegex(RuntimeError, 'Missing QtWebEngine runtime component'):
-                        attempt()
-                finally:
-                    icudtl.touch()
             with self.subTest(case='qt.conf missing a search path'):
                 qt_conf = root / 'bin/qt.conf'
                 complete = qt_conf.read_text()
@@ -342,7 +338,7 @@ class VerifyPackageTest(unittest.TestCase):
                 finally:
                     qt_conf.write_text(complete)
 
-    def test_linux_package_bundles_qtwebengine_while_other_platforms_still_reject_it(self):
+    def test_bundled_qtwebengine_is_rejected_on_every_platform(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             host = root / 'bin' / 'JustConnect'
@@ -367,22 +363,17 @@ class VerifyPackageTest(unittest.TestCase):
             with patch.object(package.subprocess, 'run', side_effect=self_test), \
                     patch.object(package, 'validate_report'), \
                     patch.object(package, 'check_proxy_recovery', return_value={}), \
-                    patch.object(package, 'check_signin_browser', return_value='QtWebEngine'), \
+                    patch.object(package, 'check_signin_browser', return_value='WebKitGTK'), \
                     patch.object(package, 'linux_audit', return_value={}) as audit, \
-                    patch.object(package, 'check_linux_network_helper', return_value={}) as helper_check, \
+                    patch.object(package, 'check_linux_network_helper', return_value={}), \
                     patch.object(package.platform, 'machine', return_value='x86_64'), \
                     patch.object(package.sys, 'platform', 'linux'):
-                package.verify(root, host, 'revision', 'preview', output, archive)
-                audit.assert_called_once()
-                self.assertEqual(audit.call_args[0][0], [webengine])
-                self.assertEqual(helper_check.call_count, 1)
-                output.unlink()
+                with self.assertRaisesRegex(RuntimeError, 'Obsolete bundled browser'):
+                    package.verify(root, host, 'revision', 'preview', output, archive)
+                audit.assert_not_called()
                 icudtl = root / 'resources' / 'icudtl.dat'
                 icudtl.parent.mkdir()
                 icudtl.touch()
-                package.verify(root, host, 'revision', 'preview', output, archive)
-                icudtl.unlink()
-                output.unlink()
                 with patch.object(package.sys, 'platform', 'darwin'), \
                         patch.object(package, 'macos_audit', return_value={}):
                     with self.assertRaisesRegex(RuntimeError, 'Obsolete bundled browser'):
@@ -610,8 +601,8 @@ class VerifyPackageTest(unittest.TestCase):
             policy = root / package.LINUX_HELPER['policy']
             policy.parent.mkdir(parents=True)
             policy.write_text('<policyconfig><action id="org.justconnect.network-helper">'
-                              '<annotate name="org.freedesktop.policykit.exec.path.js">'
-                              + str(root / 'libexec/justconnect-network-helper') + '</annotate></action></policyconfig>')
+                              '<annotate key="org.freedesktop.policykit.exec.path">'
+                              + (root / 'libexec/justconnect-network-helper').as_posix() + '</annotate></action></policyconfig>')
             script = root / package.LINUX_HELPER['setup_script']
             script.write_text('#!/bin/sh\nexit 0\n')
             script.chmod(0o755)
@@ -619,10 +610,11 @@ class VerifyPackageTest(unittest.TestCase):
                 self.assertEqual(package.check_linux_network_helper(root, {}, revision),
                                  {'protocol': facts['protocol'], 'revision': revision,
                                   'source_state': 'clean', 'policy': True, 'setup_script': True})
-            script.chmod(0o644)
-            with patch.object(package, 'run', return_value=json.dumps(facts)), \
-                    self.assertRaisesRegex(RuntimeError, 'setup script'):
-                package.check_linux_network_helper(root, {}, revision)
+            if os.name == 'posix':
+                script.chmod(0o644)
+                with patch.object(package, 'run', return_value=json.dumps(facts)), \
+                        self.assertRaisesRegex(RuntimeError, 'setup script'):
+                    package.check_linux_network_helper(root, {}, revision)
             script.unlink()
             with patch.object(package, 'run', return_value=json.dumps(facts)), \
                     self.assertRaisesRegex(RuntimeError, 'setup script'):
@@ -634,8 +626,9 @@ class VerifyPackageTest(unittest.TestCase):
                 package.check_linux_network_helper(root, {}, revision)
             helper.touch()
             helper.chmod(0o644)
-            with self.assertRaisesRegex(RuntimeError, 'mode 0755'):
-                package.check_linux_network_helper(root, {}, revision)
+            if os.name == 'posix':
+                with self.assertRaisesRegex(RuntimeError, 'mode 0755'):
+                    package.check_linux_network_helper(root, {}, revision)
             helper.chmod(0o755)
             for key, value in [('revision', 'old'), ('protocol', 999), ('protocol', True),
                                ('identity_ready', False), ('source_state', ''), ('source_state', 1)]:
@@ -643,7 +636,7 @@ class VerifyPackageTest(unittest.TestCase):
                         self.assertRaisesRegex(RuntimeError, 'runtime check'):
                     package.check_linux_network_helper(root, {}, revision)
             for text in ('<policyconfig />', '<policyconfig><action id="org.justconnect.network-helper" /></policyconfig>',
-                         '<policyconfig><annotate name="org.freedesktop.policykit.exec.path.js">/bin/sh</annotate></policyconfig>'):
+                         '<policyconfig><annotate key="org.freedesktop.policykit.exec.path">/bin/sh</annotate></policyconfig>'):
                 policy.write_text(text)
                 with patch.object(package, 'run', return_value=json.dumps(facts)), \
                         self.assertRaisesRegex(RuntimeError, 'polkit action'):

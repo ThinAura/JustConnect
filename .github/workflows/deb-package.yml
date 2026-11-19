@@ -1,0 +1,71 @@
+name: Debian package
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deb-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEB_ARTIFACT: justconnect-deb-${{ github.sha }}
+
+jobs:
+  build:
+    name: Build .deb with Debian 13 system Qt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Build the package inside a Debian 13 container
+        run: |
+          docker pull debian:13
+          docker run --rm -v "$PWD":/justconnect -w /justconnect debian:13 \
+            bash scripts/build-debian-package.sh '' justconnect.deb
+
+      - name: Upload the package built from this commit
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+          name: ${{ env.DEB_ARTIFACT }}
+          path: justconnect.deb
+
+  verify:
+    name: Clean install and launch on Debian 13
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: ${{ env.DEB_ARTIFACT }}
+
+      - name: Install with only the declared dependencies and launch
+        run: |
+          docker pull debian:13
+          docker run --rm -v "$PWD":/justconnect:ro -e DEB_FILE=justconnect.deb debian:13 bash -ec '
+            set -euo pipefail
+            dpkg-deb -f "/justconnect/$DEB_FILE" Package | grep -Fx justconnect
+            dpkg-deb -f "/justconnect/$DEB_FILE" Architecture | grep -Fx amd64
+            apt-get update
+            # A clean container only offers the declared dependencies: apt must
+            # resolve the minimum versions and launch without any SDK override.
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "/justconnect/$DEB_FILE"
+            test -x /usr/bin/JustConnect
+            test -x /usr/libexec/justconnect-network-helper
+            test -s /usr/share/polkit-1/actions/org.justconnect.network-helper.policy
+            /usr/libexec/justconnect-network-helper --version | grep -q "\"protocol\":"
+            /usr/bin/JustConnect --core-self-test | grep -q "\"ok\":true"
+          '

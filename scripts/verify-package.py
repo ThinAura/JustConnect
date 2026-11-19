@@ -162,9 +162,11 @@ def check_linux_network_helper(root, env, revision):
     helper = root / LINUX_HELPER['executable']
     if not helper.is_file():
         raise RuntimeError('Missing packaged Linux network helper')
-    mode = helper.stat().st_mode & 0o7777
-    if mode != 0o755:
-        raise RuntimeError(f'Linux network helper must be mode 0755: {helper}: {oct(mode)}')
+    if os.name == 'posix':
+        # Windows hosts cannot express Unix modes; real 0755 enforcement is a POSIX check.
+        mode = helper.stat().st_mode & 0o7777
+        if mode != 0o755:
+            raise RuntimeError(f'Linux network helper must be mode 0755: {helper}: {oct(mode)}')
     facts = json.loads(run(helper, '--version', env=env, timeout=10))
     # json booleans are ints in Python; require a real integer protocol.
     protocol = facts.get('protocol') if isinstance(facts, dict) else None
@@ -175,13 +177,15 @@ def check_linux_network_helper(root, env, revision):
         raise RuntimeError('Packaged Linux network helper failed its runtime check')
     text = (root / LINUX_HELPER['policy']).read_text() if (root / LINUX_HELPER['policy']).is_file() else ''
     if ('action id="org.justconnect.network-helper"' not in text
-            or re.search(r'name="org\.freedesktop\.policykit\.exec\.path\.js">\s*[^<]*libexec/justconnect-network-helper',
+            or re.search(r'key="org\.freedesktop\.policykit\.exec\.path">\s*[^<]*libexec/justconnect-network-helper',
                 text) is None):
         raise RuntimeError('Packaged polkit action does not authorize the packaged network helper')
     script = root / LINUX_HELPER['setup_script']
-    script_mode = script.stat().st_mode & 0o7777 if script.is_file() else None
-    if script_mode != 0o755:
-        raise RuntimeError(f'Packaged network helper setup script must be an executable 0755 file: {script}: {script_mode}')
+    if not script.is_file():
+        raise RuntimeError('Packaged network helper setup script is missing: ' + str(script))
+    if os.name == 'posix' and script.stat().st_mode & 0o7777 != 0o755:
+        script_mode = script.stat().st_mode & 0o7777
+        raise RuntimeError(f'Packaged network helper setup script must be an executable 0755 file: {script}: {oct(script_mode)}')
     run('sh', '-n', script, env=env, timeout=10)
     return {'protocol': facts['protocol'], 'revision': facts['revision'],
             'source_state': facts['source_state'], 'policy': True, 'setup_script': True}
@@ -345,9 +349,13 @@ def check_signin_browser(root, executable, probe, env):
             probe_env = dict(env, QT_QPA_PLATFORM={'win32': 'windows', 'linux': 'offscreen'}.get(sys.platform, 'cocoa'))
             if sys.platform == 'win32':
                 probe_env['QT_QPA_PLATFORM_PLUGIN_PATH'] = str(root / 'platforms')
+            command = [str(installed_probe)]
             if sys.platform == 'linux':
-                probe_env['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox --disable-gpu --disable-dev-shm-usage'
-            run(installed_probe, cwd=working, env=probe_env, timeout=30)
+                # WebKitGTK renders through the windowing system, so the probe runs
+                # under Xvfb; the retired QtWebEngine Chromium flags are gone.
+                if shutil.which('xvfb-run'):
+                    command = ['xvfb-run', '-a', str(installed_probe)]
+            run(*command, cwd=working, env=probe_env, timeout=30)
         finally:
             installed_probe.unlink()
     return {'win32': 'WebView2', 'linux': 'WebKitGTK'}.get(sys.platform, 'WKWebView')

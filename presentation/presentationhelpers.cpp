@@ -2,6 +2,9 @@
 
 #include <QApplication>
 #include <QAccessibleAnnouncementEvent>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
+#include <QAccessibilityHints>
+#endif
 #include <QClipboard>
 #include <QDate>
 #include <QDialog>

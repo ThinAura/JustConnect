@@ -7,6 +7,9 @@
 #include <QPainter>
 #include <QStyle>
 #include <QStyleHints>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
+#include <QAccessibilityHints>
+#endif
 #include <QVariantAnimation>
 
 class ConnectionMenu final : public QMenu {

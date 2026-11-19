@@ -117,6 +117,15 @@ Data = .
 Translations = translations
 EOF
 
+# Release payloads carry no debug sections: the Go core's DWARF dominates the
+# installed size otherwise. --strip-debug keeps dynamic symbols (and the Go
+# runtime's pclntab), so the payload still launches and passes the audit.
+if command -v strip >/dev/null; then
+    while IFS= read -r -d '' object; do
+        [ "$(head -c 4 "$object")" = $'\x7fELF' ] && strip --strip-debug "$object"
+    done < <(find "$package/bin" "$package/libexec" "$package/lib" "$package/plugins" -type f -print0)
+fi
+
 patchelf --set-rpath '$ORIGIN/../lib' \
     "$package/bin/$target" "$package/bin/JustConnectProxyRecovery"
 find "$package/lib" "$package/plugins" -name '*.so*' -type f -print0 | while IFS= read -r -d '' object; do

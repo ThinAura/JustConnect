@@ -35,6 +35,7 @@
 # CMake
 /cmake-build*
 /build
+/Testing/
 
 # Linux deploy output
 /JustConnect/

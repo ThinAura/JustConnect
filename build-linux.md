@@ -4,9 +4,9 @@ Linux supports both routing modes. **Automatic routing** creates a TUN device
 through a privileged helper (`justconnect-network-helper`): once per
 application start, polkit (`pkexec`) asks for the administrator password, and
 the helper installs campus routes plus split DNS for the lifetime of the
-session. Hosts need either systemd-resolved or a plain writable
-`/etc/resolv.conf`; anything else is reported before connecting and automatic
-mode stays unavailable. **Local proxy only** needs no privileges. Everything
+session. Split DNS needs an active systemd-resolved; hosts that resolve names
+another way are reported before connecting and automatic mode stays
+unavailable. **Local proxy only** needs no privileges. Everything
 else — sign-in (including the SSO browser), saved credentials, system proxy
 hand-off and recovery, Clash coexistence — behaves like the Windows and macOS
 builds.
@@ -74,8 +74,9 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 cmake --build build
 ```
 
-Run the test suite (Qt tests use the `offscreen` platform; the WebKitGTK
-sign-in browser probe also passes headless):
+Run the test suite (Qt tests use the `offscreen` platform; the sign-in browser
+tests that drive WebKitGTK need a real X11 session and report SKIP without
+one):
 
 ```sh
 QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
@@ -111,11 +112,12 @@ sudo install -D -o root -g root -m 0644 \
 ```
 
 `pkexec` refuses to execute programs it does not own, so the helper must stay
-root-owned and not group- or world-writable. The application checks this up
+root-owned and not group- or world-writable, and only the installed copy at
+the annotated system path is ever elevated. The application checks this up
 front: when no usable helper is found, automatic routing is reported as
-unavailable with a diagnostic that names the exact commands (the same steps
-appear on the server settings page) instead of failing after the password
-prompt.
+unavailable with a diagnostic that names the system path and the installer
+(the same steps appear on the server settings page) instead of failing after
+the password prompt.
 
 ## Package (Debian)
 
@@ -146,6 +148,15 @@ to `0.0.0~<version>`, which Debian's version ordering keeps below every real
 release. CI (`.github/workflows/build.yml`) runs these same steps and
 publishes the `.deb` next to the portable tarball.
 
+To build a .deb for release:
+
+```sh
+cmake -S . -B build-deb -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF -DGIT_HASH="$revision"
+cmake --build build-deb --config Release --parallel "$(nproc)"
+./scripts/package-deb.sh build-deb "$output" "$version"
+```
+
 ## Package (portable tarball)
 
 The shipped Linux artifact is a portable, self-contained tree with bundled
@@ -158,16 +169,18 @@ tar --sort=name --owner=0 --group=0 --numeric-owner -czf justconnect-linux-x64.t
 ```
 
 Users extract the tarball and run `bin/JustConnect`. **Automatic routing**
-additionally needs its helper to be executable by `pkexec`, which refuses
-user-owned files — either make the shipped copy root-owned in place:
+additionally needs the helper installed into a root-owned system directory:
+`pkexec` refuses user-owned files, and the application only elevates the
+installed copy at the annotated system path — a helper inside the extracted
+tree is never launched. The package ships a `setup-network-helper.sh` script
+at its root that performs the install:
 
 ```sh
-sudo chown root:root JustConnect/libexec/justconnect-network-helper
-sudo chmod 0755 JustConnect/libexec/justconnect-network-helper
+sudo ./setup-network-helper.sh   # helper to /usr/local/libexec plus the polkit action
 ```
 
-or install it (plus the policy, for the exact polkit message) into system
-locations:
+The install is one-time and survives re-extraction; rerun it after replacing
+the package to pick up a newer helper. The script is equivalent to:
 
 ```sh
 sudo install -D -o root -g root -m 0755 \
@@ -175,16 +188,6 @@ sudo install -D -o root -g root -m 0755 \
 sudo install -D -o root -g root -m 0644 \
     JustConnect/share/polkit-1/actions/org.justconnect.network-helper.policy \
     /usr/share/polkit-1/actions/
-```
-
-The package ships a `setup-network-helper.sh` script at its root that runs
-either of these routes for you. It needs rerunning after every extraction or
-package update, because extraction recreates `libexec/` with the extractor's
-ownership:
-
-```sh
-sudo ./setup-network-helper.sh            # make the shipped copy root-owned in place
-sudo ./setup-network-helper.sh --system   # install to /usr/local/libexec plus the policy
 ```
 
 The policy annotation names the helper path recorded at build time; when it
@@ -205,6 +208,8 @@ the extracted tree.
   backend reports unsupported and local proxy keeps working.
 - **Credential storage** uses libsecret when available and falls back to a
   0600 file next to the app data otherwise.
+- **DNS for automatic routing** installs per-link split DNS on an active
+  systemd-resolved only; there is no plain `resolv.conf` fallback.
 - **Autostart** writes an XDG autostart entry under `$XDG_CONFIG_HOME`.
 - **SSO sign-in browser** embeds WebKitGTK through X11, so Wayland sessions
   run it via XWayland. It needs `libwebkit2gtk-4.1` at runtime — the Debian
