@@ -46,6 +46,7 @@ int main(int argc,char **argv) {
     auto *form=editor.findChild<QFormLayout *>();
     auto *mode=editor.findChild<QComboBox *>("routingModeComboBox");
     auto *localPort=editor.findChild<QSpinBox *>("localSocksPortSpinBox");
+    auto *httpPort=editor.findChild<QSpinBox *>("localHttpPortSpinBox");
     auto *extraRoutes=editor.findChild<QPlainTextEdit *>("clashTargetsEdit");
     for(auto *field:QList<QWidget *>{address,port,mode}) {
         auto *label=qobject_cast<QLabel *>(form->labelForField(field));
@@ -53,7 +54,7 @@ int main(int argc,char **argv) {
             "server address and port labels are centered beside their styled fields");
     }
     check(mode->currentIndex()==0 && mode->y()>port->y() && mode->y()<verify->y()
-        && localPort->isHidden() && extraRoutes->isHidden(),"mode is near the top and only local mode shows proxy fields");
+        && localPort->isHidden() && httpPort->isHidden() && extraRoutes->isHidden(),"mode is near the top and only local mode shows proxy fields");
     auto *routingWarning=editor.findChild<QLabel *>("routingModeWarningLabel");
     check(routingWarning && routingWarning->isVisibleTo(&editor) && !routingWarning->text().isEmpty(),
         "automatic routing explains its authorization or the missing host setup");
@@ -64,11 +65,13 @@ int main(int argc,char **argv) {
     mode->setCurrentIndex(1);
     check(routingWarning->isHidden(),"local proxy mode hides the automatic routing notice");
     localPort->setValue(32081);
+    httpPort->setValue(32082);
     extraRoutes->setPlainText("192.0.2.18:22");
     auto local=SavedConnectionService::load(editor.settingsValues());
-    check(local.routingMode==RoutingMode::LocalProxy && local.proxy.socksBind=="127.0.0.1:32081",
+    check(local.routingMode==RoutingMode::LocalProxy && local.proxy.socksBind=="127.0.0.1:32081"
+        && local.proxy.httpBind=="127.0.0.1:32082",
         "local settings share one port");
-    check(!localPort->isHidden() && !extraRoutes->isHidden() && extraRoutes->maximumHeight()==ca->maximumHeight()
+    check(!localPort->isHidden() && !httpPort->isHidden() && !extraRoutes->isHidden() && extraRoutes->maximumHeight()==ca->maximumHeight()
         && local.proxy.additionalClashTargets=="192.0.2.18:22","local settings expose and save extra routes with the same field style");
     check(rules->isVisibleTo(&editor) && dnsHelp && !dnsHelp->text().contains("Clash"),
         "domain DNS remains independently editable");

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	"github.com/wtalioy/JustConnect/corelib/client"
 	"github.com/wtalioy/JustConnect/corelib/internal/ipresource"
@@ -51,10 +52,10 @@ func dialDirect(ctx context.Context, network, address string) (net.Conn, error) 
 }
 
 // CampusOnly shares the resource indexes and live policy without an ordinary fallback.
+// The copy is always marked as captured: flows routed through it, including on a
+// dialer that already forces VPN routing, must never leak back to the original
+// network through the login-origin exception.
 func (d *Dialer) CampusOnly() *Dialer {
-	if d.alwaysUseVPN {
-		return d
-	}
 	campus := *d
 	campus.alwaysUseVPN, campus.campusForced = true, true
 	return &campus
@@ -64,6 +65,7 @@ func (d *Dialer) dialOrdinary(ctx context.Context, network, address string) (net
 	if d.Upstream != nil {
 		if upstream := d.Upstream(); upstream != nil {
 			if host, ok := ctx.Value(resolve.ContextKeyResolveHost).(string); ok {
+				host = strings.TrimSuffix(strings.ToLower(host), ".")
 				if _, port, err := net.SplitHostPort(address); err == nil {
 					address = net.JoinHostPort(host, port)
 				}
@@ -188,21 +190,31 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 func (d *Dialer) dialIP(ctx context.Context, network string, endpoint netip.AddrPort) (net.Conn, error) {
 	address, port := endpoint.Addr().Unmap(), int(endpoint.Port())
 	resource, host, matchedResource := matchContextDomainResource(ctx, network, port)
+	// DNS-derived hosts arrive normalized; a native-fallback name may not.
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	useVPN := d.alwaysUseVPN
 	if !useVPN {
 		useVPN, _ = ctx.Value(resolve.ContextKeyDomainDNS).(bool)
 	}
-	if address == d.OriginalAuthentication.Address && (host == d.OriginalAuthentication.Name || !matchedResource) {
-		if useVPN && !d.campusForced {
-			// A local-proxy user flow to the login origin keeps the original network
-			// instead of being refused; refusing made the portal unreachable in the
-			// browser (socks_destination_denied for id.<campus>.edu.cn).
+	if address == d.OriginalAuthentication.Address {
+		// Only the verified login origin keeps its original-network path: refusing
+		// the portal name made it unreachable in the browser through the local
+		// proxy (socks_destination_denied). Any other destination sharing the
+		// address follows the normal policy below.
+		if host == d.OriginalAuthentication.Name {
+			if useVPN && !d.campusForced {
+				return d.dialOrdinary(ctx, network, endpoint.String())
+			}
+			if useVPN {
+				return nil, policy.ErrProtectedTarget
+			}
 			return d.dialOrdinary(ctx, network, endpoint.String())
 		}
-		if useVPN {
+		// A captured or forced flow into the verified origin address without
+		// server authorization must never leak to the original network either.
+		if !matchedResource && d.campusForced {
 			return nil, policy.ErrProtectedTarget
 		}
-		return d.dialOrdinary(ctx, network, endpoint.String())
 	}
 	snapshot, captured := ctx.Value(resolve.ContextKeyProtectionPolicy).(*policy.ProtectionPolicy)
 	if !captured && d.ProtectionPolicy != nil {

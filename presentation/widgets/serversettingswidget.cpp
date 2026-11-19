@@ -58,9 +58,13 @@ ServerSettingsWidget::ServerSettingsWidget(QWidget *parent) : QWidget(parent) {
     socksPort->setObjectName("localSocksPortSpinBox");
     socksPort->setRange(0,65535);
     socksPort->setValue(DefaultSettings::DefaultSocksPort);
+    httpPort=new QSpinBox(this);
+    httpPort->setObjectName("localHttpPortSpinBox");
+    httpPort->setRange(0,65535);
+    httpPort->setValue(DefaultSettings::DefaultHTTPPort);
     clashHelp=new QLabel(this);
     connect(routingMode,&QComboBox::currentIndexChanged,this,&ServerSettingsWidget::updateRoutingFields);
-    for(auto *field:QList<QWidget *>{address,port,routingMode,socksPort}) {
+    for(auto *field:QList<QWidget *>{address,port,routingMode,socksPort,httpPort}) {
         auto *label=new QLabel(this);label->setBuddy(field);
         // QFormLayout otherwise caps label height at 7/4 of its text height, above our taller inputs.
         label->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Expanding);
@@ -115,6 +119,7 @@ ServerSettingsWidget::ServerSettingsWidget(QWidget *parent) : QWidget(parent) {
 void ServerSettingsWidget::updateRoutingFields() {
     const bool local=routingMode->currentData().toString()==DefaultSettings::LocalProxyMode;
     form->setRowVisible(socksPort,local);
+    form->setRowVisible(httpPort,local);
     clashHelp->setVisible(local);
     clashTargetsLabel->setVisible(local);
     clashTargets->setVisible(local);
@@ -151,6 +156,8 @@ void ServerSettingsWidget::retranslate() {
 #endif
     qobject_cast<QLabel *>(form->labelForField(socksPort))->setText(tr("Local SOCKS5 port"));
     socksPort->setSpecialValueText(tr("Off"));
+    qobject_cast<QLabel *>(form->labelForField(httpPort))->setText(tr("Local HTTP port"));
+    httpPort->setSpecialValueText(tr("Off"));
     clashHelp->setText(tr("Once connected, choose Copy Clash Extend Script from the connection menu."));
     clashTargetsLabel->setText(tr("Additional Clash destinations"));
     clashTargets->setPlaceholderText(tr("Optional. One IPv4 address and TCP port per line, e.g. 192.0.2.10:22"));
@@ -170,6 +177,7 @@ void ServerSettingsWidget::load(const QSettings &settings) {
     const auto number = settings.value("JustConnect/ServerPort", 443).toInt();
     routingMode->setCurrentIndex(qMax(0,routingMode->findData(settings.value(DefaultSettings::RoutingModeKey))));
     socksPort->setValue(settings.value(DefaultSettings::SocksPortKey,DefaultSettings::DefaultSocksPort).toInt());
+    httpPort->setValue(settings.value(DefaultSettings::HTTPPortKey,DefaultSettings::DefaultHTTPPort).toInt());
     builtIn = DefaultSettings::isBuiltInConnection(settings);
     address->setText(host);
     address->setReadOnly(builtIn);
@@ -197,5 +205,6 @@ QVariantMap ServerSettingsWidget::settingsValues() const {
         {"JustConnect/ServerPort",serverPort()},{DefaultSettings::DomainDnsRules,domainDnsRules->toPlainText().trimmed()},
         {DefaultSettings::AdditionalClashTargets,clashTargets->toPlainText().trimmed()},
         {DefaultSettings::RoutingModeKey,routingMode->currentData()},{DefaultSettings::SocksPortKey,socksPort->value()},
+        {DefaultSettings::HTTPPortKey,httpPort->value()},
         {"Common/NeedsConfiguration",false}};
 }

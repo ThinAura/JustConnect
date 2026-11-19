@@ -71,7 +71,7 @@ QJsonObject configuration(const ConnectionOptions &p, CoreEngine::Operation oper
         {"auth", QJsonObject{{"auth_id",p.endpoint.authId},{"sub_type",p.endpoint.authSubType},{"method", p.endpoint.authType.isEmpty() ? QString() : "auth/" + p.endpoint.authType},
             {"username", p.credentials.username}, {"password", p.credentials.password},
             {"phone", p.endpoint.phone}, {"domain", p.endpoint.loginDomain}, {"totp_secret", p.credentials.totpSecret}}},
-        {"listeners", QJsonObject{{"socks", p.proxy.socksBind}, {"http", localProxy ? QString{} : p.proxy.httpBind}}},
+        {"listeners", QJsonObject{{"socks", p.proxy.socksBind}, {"http", p.proxy.httpBind}}},
         {"network", QJsonObject{{"interface", p.behavior.bindInterface}, {"auto_detect", p.behavior.autoDetectInterface},
             {"local_dns", p.dns.localDnsServer}, {"secondary_dns", p.dns.secondary},
             {"dns_cache_ttl", p.dns.ttl}, {"disable_remote_dns", p.dns.disableRemoteDns}}}};
