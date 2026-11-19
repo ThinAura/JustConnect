@@ -38,7 +38,9 @@ signals:
     void addressFocusRequested();
 
 protected:
+#ifdef Q_OS_LINUX
     bool event(QEvent *) override;
+#endif
     void resizeEvent(QResizeEvent *) override;
     void showEvent(QShowEvent *) override;
     void hideEvent(QHideEvent *) override;

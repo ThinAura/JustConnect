@@ -307,15 +307,6 @@ void compileScopeRules(SignInBrowser *self)
     g_bytes_unref(source);
 }
 
-// QJsonDocument rejects bare scalars, so a JSON string literal comes from a
-// one-element array with its brackets stripped; the result embeds safely in a
-// JavaScript expression.
-QString jsonLiteral(const QString &value)
-{
-    const auto json = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
-    return QString::fromUtf8(json.mid(1, json.size() - 2));
-}
-
 // Final answer for a classified navigation: the host policy decides, and a
 // rejected main-frame navigation reports a failed load because WebKit emits no
 // completion for ignored decisions.
@@ -333,29 +324,30 @@ void applyNavigationPolicy(SignInBrowser *self, WebKitPolicyDecision *decision, 
 }
 
 // WebKitGTK reports a null frame name for both the main frame and unnamed
-// iframes, and only redirect continuations carry Sec-Fetch-Dest, so the target
-// can stay ambiguous. Ask the live document (the navigation has not committed
-// yet) whether one of its iframes navigates to exactly this URL: a matching
-// iframe means a frame load, any other answer fails closed as a frame load.
-// The decision stays pending until the census answers, so the decision keeps
-// an owned reference: WebKit releases it once the signal handler returns.
+// iframes, and initial navigations carry no Sec-Fetch-Dest, so the target can
+// stay ambiguous. Ask the live document (the navigation has not committed yet):
+// a page without any iframe cannot host a frame load, so the navigation must
+// be the main frame; a page that contains frames stays ambiguous and fails
+// closed as a frame load, so an ambiguous callback can never complete
+// sign-in. The decision stays pending until the census answers, so the
+// decision keeps an owned reference: WebKit releases it once the signal
+// handler returns.
 void probeFrameIdentity(SignInBrowser *self, WebKitPolicyDecision *decision, const QUrl &target)
 {
     g_object_ref(decision);
     const auto script = QStringLiteral(
-        "(function(){var found=false;document.querySelectorAll('iframe').forEach(function(frame){"
-        "try{if(new URL(frame.src,document.baseURI).href===%1)found=true}catch(e){}});return found})()")
-        .arg(jsonLiteral(target.toString(QUrl::FullyEncoded)));
+        "(function(){return document.querySelectorAll('iframe').length"
+        " ? \"ambiguous\" : \"main\"})()");
     const QPointer<SignInBrowser> guard(self);
     self->runJavaScript(script, [guard, decision, target](const QVariant &result) {
         const auto release = qScopeGuard([decision] { g_object_unref(decision); });
-        // A boolean answers the census; anything else (evaluate error, null)
-        // fails closed and treats the navigation as a frame load. X11's Bool
-        // macro forbids the QMetaType::Bool token here.
-        const bool insideFrame = result.metaType() == QMetaType::fromType<bool>()
-            ? result.toBool() : true;
+        // Only the census verdict "main" classifies the navigation as the main
+        // frame; any other answer (a page with frames, evaluate error, null)
+        // fails closed as a frame load.
+        const bool main = result.metaType() == QMetaType::fromType<QString>()
+            && result.toString() == QLatin1String("main");
         if (!guard) return;
-        applyNavigationPolicy(guard.data(), decision, target, !insideFrame);
+        applyNavigationPolicy(guard.data(), decision, target, main);
     });
 }
 
@@ -380,21 +372,27 @@ gboolean onDecidePolicy(WebKitWebView *, WebKitPolicyDecision *decision, WebKitP
             webkit_policy_decision_use(decision);
             return TRUE;
         }
-        // WebKitGTK >= 2.40 reports a null frame name for both the main frame
-        // and unnamed iframes, and only redirect continuations carry
-        // Sec-Fetch-Dest, so the frame identity comes from the remaining
-        // signals: named targets are frames, an explicit load() call always
-        // targets the main frame, user-driven actions are never frame loads,
-        // and whatever stays ambiguous goes through the census probe.
+        // WebKitGTK reports a null frame name for both the main frame and
+        // unnamed iframes. The frame identity comes from the remaining
+        // signals: redirect continuations carry Sec-Fetch-Dest, whose value
+        // separates the main frame ("document") from subframes ("iframe",
+        // so a redirected iframe can never borrow the main-frame identity);
+        // named targets are frames; reloads and history moves are the
+        // dialog's own main-frame controls; user-driven actions are never
+        // frame loads; an explicit load() call targets the main frame; and
+        // whatever stays ambiguous goes through the census probe.
         const gchar *frameName = webkit_navigation_action_get_frame_name(action);
         SoupMessageHeaders *headers = webkit_uri_request_get_http_headers(
             webkit_navigation_action_get_request(action));
         const gchar *dest = headers ? soup_message_headers_get_one(headers, "Sec-Fetch-Dest") : nullptr;
+        const auto navigationType = webkit_navigation_action_get_navigation_type(action);
         bool main;
         if (frameName) main = false;
-        else if (dest && QLatin1String(dest) == "document") main = true;
+        else if (dest) main = QLatin1String(dest) == "document";
+        else if (navigationType == WEBKIT_NAVIGATION_TYPE_RELOAD
+            || navigationType == WEBKIT_NAVIGATION_TYPE_BACK_FORWARD) main = true;
         else if (webkit_navigation_action_is_user_gesture(action)
-            && webkit_navigation_action_get_navigation_type(action) != WEBKIT_NAVIGATION_TYPE_OTHER) main = true;
+            && navigationType != WEBKIT_NAVIGATION_TYPE_OTHER) main = true;
         else if (target == native->topLoad) main = true;
         else {
             probeFrameIdentity(self, decision, target);
@@ -470,7 +468,10 @@ gboolean onLoadFailedWithTlsErrors(WebKitWebView *view, const gchar *failing_uri
     // a verified one only chains that verify against the campus CA anchors.
     const bool okay = !tls.verify ? BrowserOrigin::same(target, native->callback)
         : trusted(tlsChain(certificate), target.host(), tls.caPem);
-    qCDebug(browserLog) << "certificate error" << target << okay;
+    // Callback redirects carry authorization tokens in their query; the log
+    // keeps the origin so failures stay diagnosable without leaking them.
+    qCDebug(browserLog) << "certificate error" << target.scheme() + "://" + target.host()
+        + ":" + QString::number(target.port(target.scheme() == "https" ? 443 : 80)) << okay;
     if (!okay) {
         emit self->certificateRejected();
         return FALSE; // load-failed follows and reports the failed load.
