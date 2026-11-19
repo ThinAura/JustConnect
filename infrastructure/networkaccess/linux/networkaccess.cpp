@@ -40,7 +40,7 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
     // snapshot per change; an unchanged connection requests none.
     monitor = new LinuxNetworkMonitor(-1, this);
     connect(monitor, &LinuxNetworkMonitor::networkChanged, this, [this, policy] {
-        if (stage == Stage::Ready && !policy->isBusy()) policy->refresh();
+        if (stage == Stage::Ready) policy->requestRefresh();
     });
     // A failed restore keeps the helper's ownership record; the session stays
     // in Stopping and retries the cleanup until it succeeds, which blocks a
@@ -189,7 +189,9 @@ void LinuxNetworkAccess::observeModel()
     const auto model = policy->model();
     const auto exit = originalExitSnapshot(model["network"].toObject(), model["resources"].toObject()["underlay_interface"].toString());
     const auto owned = helper.ownedConfiguration();
-    if (!exit || *exit != originalExit || (owned && !linuxOriginalDnsMatches(*owned, helper.dnsMode(), model["dns"].toObject()))) {
+    const auto ownedDevice = helper.ownedDevice();
+    if (!exit || *exit != originalExit || (owned && ownedDevice
+        && !linuxOriginalDnsMatches(*owned, *ownedDevice, helper.dnsMode(), model["dns"].toObject()))) {
         stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Original network exit changed; restoring before reconnecting.")); return;
     }
     const auto update = owned ? updatedLinuxCapturePrefixes(model["resources"].toObject(), policy->confirmedProtection(), *owned,

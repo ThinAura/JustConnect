@@ -13,7 +13,8 @@ struct LinuxHelperAvailability {
 
 LinuxHelperAvailability linuxNetworkHelperAvailability();
 
-// The helper executable pkexec may run: the installed system path when it is
-// root-owned there, otherwise the copy shipped in the portable package —
-// pkexec refuses programs it does not own, so anything else is empty.
+// The helper executable pkexec may run: only the root-owned copy at the
+// annotated system path qualifies. pkexec refuses programs it does not own and
+// executes exactly the annotated path, so anything else — including a copy
+// shipped inside an extracted archive — is empty.
 QString linuxNetworkHelperExecutable();

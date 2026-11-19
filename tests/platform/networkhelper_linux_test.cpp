@@ -372,10 +372,12 @@ static void ownershipChecks()
         {"198.18.0.6/32", "198.18.1.0/24"}, {"campus.example.test"}};
     const LinuxHelperDevice device{QStringLiteral("jc0"), 42, 1400, QStringLiteral("198.18.0.1"), QStringLiteral("198.18.0.2")};
     check(!linuxOriginalNetworkView(configuration, {QString(), 42, 1400, QStringLiteral("198.18.0.1"), QStringLiteral("198.18.0.2")},
-            QStringLiteral("file")), QStringLiteral("Nameless device acquired a network view"));
+            QStringLiteral("resolved")), QStringLiteral("Nameless device acquired a network view"));
     check(!linuxOriginalNetworkView(configuration, device, QStringLiteral("dhcp")),
         QStringLiteral("Unknown DNS mode acquired a network view"));
-    check(!linuxOriginalNetworkView({"127.0.0.1", "198.18.0.2", 1400, {}, {}}, device, QStringLiteral("file")),
+    check(!linuxOriginalNetworkView(configuration, device, QStringLiteral("file")),
+        QStringLiteral("The removed resolv.conf file mode acquired a network view"));
+    check(!linuxOriginalNetworkView({"127.0.0.1", "198.18.0.2", 1400, {}, {}}, device, QStringLiteral("resolved")),
         QStringLiteral("Loopback ownership acquired a network view"));
     const QJsonObject network{{"interfaces", QJsonArray{
             QJsonObject{{"name", "eth0"}, {"index", 2}, {"up", true}, {"addresses", QJsonArray{"192.0.2.5/24"}}},
@@ -383,25 +385,39 @@ static void ownershipChecks()
         {"routes", QJsonArray{QJsonObject{{"destination", "198.18.0.6/32"}, {"interface_index", 42}},
             QJsonObject{{"destination", "198.18.1.0/24"}, {"interface_index", 42}},
             QJsonObject{{"destination", "198.18.0.7/32"}, {"interface_index", 2}}}}};
-    const QJsonObject dns{{"resolv_conf", QJsonObject{{"nameservers", QJsonArray{"198.18.0.2", "10.0.0.1"}},
-        {"search", QJsonArray{"campus.example.test"}}}}};
-    const auto filter = linuxOriginalNetworkView(configuration, device, QStringLiteral("file"));
+    // Per-link resolver state: the helper's entry rides the owned TUN link; a
+    // foreign split-DNS entry on the underlay must survive every subtraction.
+    const QJsonObject dns{
+        {"resolv_conf", QJsonObject{
+            {"nameservers", QJsonArray{"10.0.0.1"}},
+            {"search", QJsonArray{"campus.example.test"}}}},
+        {"resolved", QJsonObject{
+            {"links", QJsonArray{
+                QJsonObject{
+                    {"index", 2}, {"interface", "eth0"},
+                    {"servers", QJsonArray{"10.0.0.1"}},
+                    {"domains", QJsonArray{"~foreign.example"}}},
+                QJsonObject{
+                    {"index", 42}, {"interface", "jc0"},
+                    {"servers", QJsonArray{"198.18.0.2"}},
+                    {"domains", QJsonArray{"~campus.example.test"}}}}}}}};
+    const auto filter = linuxOriginalNetworkView(configuration, device, QStringLiteral("resolved"));
     check(static_cast<bool>(filter), QStringLiteral("Valid ownership lost its network view"));
-    const auto fileView = filter(network, dns, nullptr);
-    check(fileView && fileView->first["interfaces"].toArray().size() == 1
-        && fileView->first["interfaces"].toArray().at(0).toObject()["name"] == "eth0"
-        && fileView->first["routes"].toArray().size() == 1
-        && fileView->first["routes"].toArray().at(0).toObject()["destination"] == "198.18.0.7/32",
-        QStringLiteral("File-mode view kept the owned interface, its routes or lost the original exit"));
-    check(fileView->second["resolv_conf"].toObject()["nameservers"].toArray() == QJsonArray{QJsonValue("10.0.0.1")},
-        QStringLiteral("File-mode view kept the prepended peer nameserver"));
-    const auto resolvedView = linuxOriginalNetworkView(configuration, device, QStringLiteral("resolved"))(network, dns, nullptr);
-    check(resolvedView && resolvedView->second["resolv_conf"].toObject()["nameservers"].toArray() == QJsonArray{
-            QJsonValue("198.18.0.2"), QJsonValue("10.0.0.1")},
-        QStringLiteral("Resolved-mode view touched per-host resolver state"));
+    const auto view = filter(network, dns, nullptr);
+    check(view && view->first["interfaces"].toArray().size() == 1
+        && view->first["interfaces"].toArray().at(0).toObject()["name"] == "eth0"
+        && view->first["routes"].toArray().size() == 1
+        && view->first["routes"].toArray().at(0).toObject()["destination"] == "198.18.0.7/32",
+        QStringLiteral("Resolved-mode view kept the owned interface, its routes or lost the original exit"));
+    const auto links = view->second["resolved"].toObject()["links"].toArray();
+    check(links.size() == 1 && links.at(0).toObject()["interface"] == "eth0"
+        && links.at(0).toObject()["domains"].toArray() == QJsonArray{QJsonValue("~foreign.example")},
+        QStringLiteral("Resolved-mode view kept the owned per-link resolver or lost a foreign split-DNS entry"));
+    check(view->second["resolv_conf"].toObject()["nameservers"].toArray() == QJsonArray{QJsonValue("10.0.0.1")},
+        QStringLiteral("Resolved-mode view changed the host resolver snapshot"));
     const auto dnslessView = linuxOriginalNetworkView(configuration, device, QString())(network, dns, nullptr);
     check(dnslessView && dnslessView->second == dns, QStringLiteral("DNS-less ownership changed the snapshot"));
-    // Drift in the owned interface, its identity or the installed nameserver fails closed.
+    // Drift in the owned interface, its identity or its resolver entry fails closed.
     QString reason;
     check(!filter(QJsonObject{{"interfaces", QJsonArray{QJsonObject{{"name", "eth0"}, {"index", 2}, {"up", true}}}},
         {"routes", QJsonArray{}}}, dns, &reason) && reason.contains("missing from the network snapshot"),
@@ -411,30 +427,56 @@ static void ownershipChecks()
     auto down = network; auto rows = down["interfaces"].toArray(); auto owned = rows.at(1).toObject();
     owned["up"] = false; rows.replace(1, owned); down["interfaces"] = rows;
     const auto downView = filter(down, dns, &reason);
-    check(downView.has_value() && fileView.has_value() && *downView == *fileView,
+    check(downView.has_value() && view.has_value() && *downView == *view,
         QStringLiteral("A torn-down owned device still lost its network view"));
     auto duplicate = network; rows = duplicate["interfaces"].toArray(); rows.append(rows.at(1));
     duplicate["interfaces"] = rows;
     check(!filter(duplicate, dns, &reason) && reason.contains("duplicated"),
         QStringLiteral("Duplicated owned device kept a network view"));
-    auto demoted = dns; auto conf = demoted["resolv_conf"].toObject();
-    conf["nameservers"] = QJsonArray{QJsonValue("10.0.0.1"), QJsonValue("198.18.0.2")};
-    demoted["resolv_conf"] = conf;
-    check(filter(network, demoted, nullptr).has_value(),
-        QStringLiteral("A peer at another position could not be subtracted"));
-    auto removed = dns; conf = removed["resolv_conf"].toObject();
-    conf["nameservers"] = QJsonArray{QJsonValue("10.0.0.1")};
-    removed["resolv_conf"] = conf;
-    check(!filter(network, removed, &reason) && reason.contains("owned nameserver is missing"),
-        QStringLiteral("Missing peer nameserver kept a file-mode view"));
-    check(linuxOriginalDnsMatches(configuration, QStringLiteral("file"), dns)
-        && linuxOriginalDnsMatches(configuration, QStringLiteral("resolved"), QJsonObject{})
-        && linuxOriginalDnsMatches(configuration, QString(), QJsonObject{}),
+    auto unresolved = dns;
+    auto resolved = unresolved["resolved"].toObject();
+    resolved["links"] = QJsonArray{QJsonObject{{"index", 2}, {"interface", "eth0"},
+        {"servers", QJsonArray{"10.0.0.1"}}, {"domains", QJsonArray{"~foreign.example"}}}};
+    unresolved["resolved"] = resolved;
+    check(!filter(network, unresolved, &reason) && reason.contains("owned per-link resolver is missing"),
+        QStringLiteral("Missing owned per-link resolver kept a resolved-mode view"));
+    auto unlisted = dns;
+    unlisted["resolved"] = QJsonObject{{"global", true}};
+    check(!filter(network, unlisted, &reason) && reason.contains("link list"),
+        QStringLiteral("A resolver snapshot without a link list kept a resolved-mode view"));
+    check(linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), dns)
+        && linuxOriginalDnsMatches(configuration, device, QString(), QJsonObject{}),
         QStringLiteral("Matching DNS ownership was rejected"));
-    check(!linuxOriginalDnsMatches(configuration, QStringLiteral("file"), demoted)
-        && !linuxOriginalDnsMatches(configuration, QStringLiteral("file"), removed)
-        && !linuxOriginalDnsMatches(configuration, QStringLiteral("file"), QJsonObject{})
-        && !linuxOriginalDnsMatches(configuration, QStringLiteral("dhcp"), QJsonObject{}),
+    // A demoted server list, a lost routing domain or a vanished owned link
+    // must stop matching.
+    auto reordered = dns;
+    resolved = reordered["resolved"].toObject();
+    auto replaceOwnedLink = [&resolved](const std::function<void(QJsonObject &)> &change) {
+        QJsonArray rows;
+        for (const auto &value : resolved["links"].toArray()) {
+            auto row = value.toObject();
+            if (row["interface"] == "jc0") change(row);
+            rows.append(row);
+        }
+        resolved["links"] = rows;
+    };
+    replaceOwnedLink([](QJsonObject &row) { row["servers"] = QJsonArray{QJsonValue("10.0.0.1"), QJsonValue("198.18.0.2")}; });
+    reordered["resolved"] = resolved;
+    auto demoted = dns;
+    resolved = demoted["resolved"].toObject();
+    replaceOwnedLink([](QJsonObject &row) { row["domains"] = QJsonArray{QJsonValue("~other.example")}; });
+    demoted["resolved"] = resolved;
+    auto vanished = dns;
+    resolved = vanished["resolved"].toObject();
+    QJsonArray remaining;
+    for (const auto &value : resolved["links"].toArray())
+        if (value.toObject()["interface"] != "jc0") remaining.append(value);
+    resolved["links"] = remaining;
+    vanished["resolved"] = resolved;
+    check(!linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), reordered)
+        && !linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), demoted)
+        && !linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), vanished)
+        && !linuxOriginalDnsMatches(configuration, device, QStringLiteral("dhcp"), QJsonObject{}),
         QStringLiteral("Lost DNS ownership still matched"));
 }
 

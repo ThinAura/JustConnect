@@ -33,7 +33,9 @@ var (
 	configureTUNFn = func(d *tunDevice, local, peer netip.Addr, mtu int) error {
 		return d.configure(local, peer, mtu)
 	}
-	applyDNSFn = applyDNS
+	applyDNSFn      = applyDNS
+	detectDNSModeFn = detectDNSMode
+	withdrawDNSFn   = withdrawDNS
 )
 
 func main() {
@@ -245,7 +247,7 @@ func (s *helperSession) dispatch(request *request) (reply *response, attachFD in
 			reply = request.reply(statusFailed, err.Error(), nil)
 			break
 		}
-		mode, err := detectDNSMode()
+		mode, err := detectDNSModeFn()
 		reply = request.reply(statusOK, "", nil)
 		if err != nil {
 			reply.Detail = err.Error()
@@ -333,7 +335,7 @@ func (s *helperSession) apply(request *request) (*deviceInfo, int, error) {
 	// host fails without leaving a half-configured device behind.
 	dnsMode := dnsModeSkipped
 	if len(config.Domains) > 0 {
-		dnsMode, err = detectDNSMode()
+		dnsMode, err = detectDNSModeFn()
 		if err != nil {
 			return nil, -1, fmt.Errorf("automatic routing needs a supported DNS mechanism: %w", err)
 		}
@@ -353,7 +355,7 @@ func (s *helperSession) apply(request *request) (*deviceInfo, int, error) {
 	// state file stays) so the cleanup can be retried and a fresh connection
 	// stays blocked until it succeeds.
 	fail := func(err error) (*deviceInfo, int, error) {
-		if dnsErr := withdrawDNS(state.DNS); dnsErr != nil {
+		if dnsErr := withdrawDNSFn(state.DNS); dnsErr != nil {
 			err = fmt.Errorf("%w; restore DNS also failed: %v", err, dnsErr)
 			// Re-publish the record (device and DNS ownership) so the next
 			// helper instance or a retry can finish the cleanup.
@@ -513,7 +515,7 @@ func (s *helperSession) restore() error {
 		return nil
 	}
 	var problems []string
-	if err := withdrawDNS(state.DNS); err != nil {
+	if err := withdrawDNSFn(state.DNS); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if device := state.Device; device != nil {
@@ -551,10 +553,10 @@ func (s *helperSession) restore() error {
 func withdrawRecordedState(state *ownedState) error {
 	device := state.Device
 	if device == nil {
-		return withdrawDNS(state.DNS)
+		return withdrawDNSFn(state.DNS)
 	}
 	var problems []string
-	if err := withdrawDNS(state.DNS); err != nil {
+	if err := withdrawDNSFn(state.DNS); err != nil {
 		problems = append(problems, err.Error())
 	}
 	iface, err := net.InterfaceByName(device.Name)

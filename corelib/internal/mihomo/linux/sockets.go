@@ -35,12 +35,19 @@ func OwnsTCP(ctx context.Context, p model.Process, target netip.AddrPort) bool {
 }
 
 // FilterTCPListeners keeps verified endpoints in their original order, in place.
+// Both kernel TCP tables are read once and the rows are reused across every
+// candidate: reading /proc/net/tcp{,6} is a kernel table walk, and a per-target
+// read would repeat it for each advertised listener.
 func FilterTCPListeners(ctx context.Context, p model.Process, targets []netip.AddrPort) []netip.AddrPort {
 	if len(targets) == 0 || ctx.Err() != nil || !Valid(p) {
 		return nil
 	}
 	inodes, err := processSocketInodes(p.PID)
 	if err != nil || len(inodes) == 0 {
+		return nil
+	}
+	rows, err := tcpListeners()
+	if err != nil {
 		return nil
 	}
 	owned := targets[:0]
@@ -51,7 +58,7 @@ func FilterTCPListeners(ctx context.Context, p model.Process, targets []netip.Ad
 		if !target.Addr().IsLoopback() || target.Port() == 0 {
 			continue
 		}
-		if listenerOwned(inodes, p, target) {
+		if listenerOwned(rows, inodes, target) {
 			owned = append(owned, target)
 		}
 	}
@@ -61,11 +68,7 @@ func FilterTCPListeners(ctx context.Context, p model.Process, targets []netip.Ad
 	return owned
 }
 
-func listenerOwned(inodes map[int]bool, p model.Process, target netip.AddrPort) bool {
-	rows, err := tcpListeners()
-	if err != nil {
-		return false
-	}
+func listenerOwned(rows []tcpRow, inodes map[int]bool, target netip.AddrPort) bool {
 	for _, row := range rows {
 		if row.inode <= 0 || !inodes[row.inode] {
 			continue

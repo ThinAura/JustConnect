@@ -2,6 +2,7 @@
 #include <QLibrary>
 #include <QStringList>
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <vector>
 
@@ -76,7 +77,7 @@ QString schemaValue(const GioApi &api, void *variant)
 // Deliver GSettings notifications on the Qt event loop instead of the glib dispatch.
 void changedTrampoline(void *, const char *, void *data)
 {
-    QMetaObject::invokeMethod(static_cast<ProxyChanges *>(data), &ProxyChanges::handleSignal,
+    QMetaObject::invokeMethod(static_cast<ProxyChanges *>(data), &ProxyChanges::noteSignal,
         Qt::QueuedConnection);
 }
 }
@@ -138,6 +139,12 @@ struct ProxyChanges::Watch {
 ProxyChanges::ProxyChanges(QObject *parent) : QObject(parent), watch(std::make_unique<Watch>())
 {
     watch->observer = this;
+    // A settings write burst (mode plus per-protocol keys) fires one GSettings
+    // signal per key; the snapshot read waits for the burst to settle so one
+    // movement check and one emission serve the whole batch.
+    batch.setSingleShot(true);
+    batch.setInterval(std::chrono::milliseconds(150));
+    connect(&batch, &QTimer::timeout, this, &ProxyChanges::handleSignal);
     QLibrary gio, gobject, glib;
     gio.setFileName(GioLibrary);
     gobject.setFileName(GObjectLibrary);
@@ -176,6 +183,13 @@ ProxyChanges::ProxyChanges(QObject *parent) : QObject(parent), watch(std::make_u
 void ProxyChanges::setSnapshotReader(std::function<QByteArray()> reader)
 {
     watch->reader = std::move(reader);
+}
+
+void ProxyChanges::noteSignal()
+{
+    // The first notification of a burst opens the batch window; the rest of
+    // the burst is absorbed while it runs and one read follows its expiry.
+    if (!batch.isActive()) batch.start();
 }
 
 void ProxyChanges::handleSignal()

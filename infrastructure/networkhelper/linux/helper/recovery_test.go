@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -52,13 +51,17 @@ func fakeDevice(nl *fakeNetlink) *tunDevice {
 	return &tunDevice{name: "tun-fake", index: 4242, fd: -1, nl: nl}
 }
 
-// applyFixture relocates every mutated path and installs the fake device.
+// applyFixture relocates every mutated path, stubs the DNS mode to an active
+// systemd-resolved, and installs the fake device. DNS application and
+// withdrawal run through the seams so tests can observe the write-ahead
+// contract and force restore failures without invoking resolvectl.
 type applyFixture struct {
-	resolv   string
-	original string
-	nl       *fakeNetlink
-	uid      int
-	t        *testing.T
+	nl          *fakeNetlink
+	uid         int
+	t           *testing.T
+	applied     []*dnsOwnership
+	withdrawn   []*dnsOwnership
+	withdrawErr error
 	// dnsHook lets a test observe or disturb the DNS application itself.
 	dnsHook func(*dnsOwnership) error
 }
@@ -66,23 +69,41 @@ type applyFixture struct {
 func newApplyFixture(t *testing.T) *applyFixture {
 	t.Helper()
 	withStateRoot(t)
-	directory := t.TempDir()
 	f := &applyFixture{
-		resolv:   filepath.Join(directory, "resolv.conf"),
-		original: "nameserver 10.0.0.1\nnameserver 10.0.0.2\n",
-		nl:       &fakeNetlink{},
-		uid:      os.Getuid(),
-		t:        t,
-		dnsHook:  applyDNS,
+		nl:  &fakeNetlink{},
+		uid: os.Getuid(),
+		t:   t,
+		// Real applyDNS needs a live interface; tests stub per-plan behavior.
+		dnsHook: func(*dnsOwnership) error { return nil },
 	}
-	if err := os.WriteFile(f.resolv, []byte(f.original), 0o644); err != nil {
-		t.Fatal(err)
+	detectDNSModeFn = func() (string, error) { return dnsModeResolved, nil }
+	applyDNSFn = func(ownership *dnsOwnership) error {
+		// The write-ahead contract: the record — including the DNS intent —
+		// must be on disk before the first DNS mutation.
+		state, err := loadState(f.uid)
+		if err != nil || state == nil || state.DNS == nil {
+			t.Errorf("DNS mutation started without a written ownership record (err=%v)", err)
+		} else if state.DNS.Mode != ownership.Mode || state.DNS.Iface != ownership.Iface {
+			t.Errorf("recorded DNS ownership does not match the applied plan: %+v vs %+v", state.DNS, ownership)
+		}
+		f.applied = append(f.applied, ownership)
+		return f.dnsHook(ownership)
 	}
-	resolvConfPath = f.resolv
+	withdrawDNSFn = func(ownership *dnsOwnership) error {
+		if f.withdrawErr != nil {
+			return f.withdrawErr
+		}
+		f.withdrawn = append(f.withdrawn, ownership)
+		return withdrawDNS(ownership)
+	}
+	t.Cleanup(func() {
+		applyDNSFn = applyDNS
+		detectDNSModeFn = detectDNSMode
+		withdrawDNSFn = withdrawDNS
+	})
 	if err := prepareStateDir(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resolvConfPath = "/etc/resolv.conf" })
 	return f
 }
 
@@ -96,18 +117,6 @@ func (f *applyFixture) apply(t *testing.T, prefixes []string) (*deviceInfo, int,
 			return d.configure(local, peer, mtu)
 		}
 	})
-	applyDNSFn = func(ownership *dnsOwnership) error {
-		// The write-ahead contract: the record — including the DNS intent —
-		// must be on disk before the first DNS mutation.
-		state, err := loadState(f.uid)
-		if err != nil || state == nil || state.DNS == nil {
-			t.Errorf("DNS mutation started without a written ownership record (err=%v)", err)
-		} else if state.DNS.Inserted != ownership.Inserted || state.DNS.ResolvPath != ownership.ResolvPath {
-			t.Errorf("recorded DNS ownership does not match the applied plan: %+v vs %+v", state.DNS, ownership)
-		}
-		return f.dnsHook(ownership)
-	}
-	t.Cleanup(func() { applyDNSFn = applyDNS })
 	session := &helperSession{uid: f.uid, pid: os.Getpid()}
 	requestText, err := json.Marshal(map[string]any{
 		"version": helperProtocol, "operation": opApply, "owner": testOwner, "request_id": testRequest,
@@ -142,12 +151,8 @@ func TestApplyRollsBackDNSWhenRouteSetupFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "route add refused") {
 		t.Fatalf("expected the route failure to surface, got %v", err)
 	}
-	data, err := os.ReadFile(f.resolv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != f.original {
-		t.Fatalf("DNS was not rolled back after the route failure: %q", string(data))
+	if len(f.applied) != 1 || len(f.withdrawn) != 1 {
+		t.Fatalf("applied DNS plans %d / withdrawn %d, expected one of each", len(f.applied), len(f.withdrawn))
 	}
 	if record := f.record(t); record != nil {
 		t.Fatalf("the ownership record survived a successful rollback: %+v", record)
@@ -163,20 +168,7 @@ func TestApplyRollsBackDNSWhenRouteSetupFails(t *testing.T) {
 func TestApplyRetainsRecordWhenDNSRestoreFails(t *testing.T) {
 	f := newApplyFixture(t)
 	f.nl.routeErr = errors.New("route add refused: kernel says no")
-	// After DNS is applied, make the file unreadable so the restore fails.
-	f.dnsHook = func(ownership *dnsOwnership) error {
-		if err := applyDNS(ownership); err != nil {
-			return err
-		}
-		if err := os.Remove(f.resolv); err != nil {
-			t.Fatal(err)
-		}
-		// A directory at the recorded path makes every later read fail.
-		if err := os.Mkdir(f.resolv, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		return nil
-	}
+	f.withdrawErr = errors.New("resolvectl revert refused")
 	_, _, err := f.apply(t, []string{"10.50.0.0/16"})
 	if err == nil || !strings.Contains(err.Error(), "restore DNS also failed") {
 		t.Fatalf("expected the DNS restore failure to surface, got %v", err)
@@ -197,25 +189,25 @@ func TestRestoreRetainsRecordOnFailure(t *testing.T) {
 	if err := prepareStateDir(); err != nil {
 		t.Fatal(err)
 	}
-	directory := t.TempDir()
-	unreadable := filepath.Join(directory, "blocked")
-	if err := os.Mkdir(unreadable, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	withStateRoot(t)
-	if err := prepareStateDir(); err != nil {
-		t.Fatal(err)
-	}
 	session := &helperSession{uid: os.Getuid(), pid: os.Getpid()}
 	session.dev = fakeDevice(&fakeNetlink{})
 	session.state = &ownedState{
 		Version: stateVersion, UID: session.uid, PID: session.pid,
 		Device: &deviceInfo{Name: "tun-fake", Index: 4242},
-		DNS:    &dnsOwnership{Mode: dnsModeFile, ResolvPath: unreadable, Inserted: "nameserver 10.22.4.2"},
+		DNS:    &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-fake", Peer: "10.22.4.2"},
 	}
 	if err := saveState(session.state); err != nil {
 		t.Fatal(err)
 	}
+	attempts := 0
+	withdrawDNSFn = func(ownership *dnsOwnership) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("resolvectl revert refused")
+		}
+		return withdrawDNS(ownership)
+	}
+	t.Cleanup(func() { withdrawDNSFn = withdrawDNS })
 	if err := session.restore(); err == nil {
 		t.Fatal("a failed DNS restore must be reported")
 	}
@@ -226,9 +218,6 @@ func TestRestoreRetainsRecordOnFailure(t *testing.T) {
 		t.Fatalf("the on-disk record was not retained: %v %+v", err, record)
 	}
 	// Once the obstruction is gone the same record withdraws cleanly.
-	if err := os.Remove(unreadable); err != nil {
-		t.Fatal(err)
-	}
 	if err := session.restore(); err != nil {
 		t.Fatalf("the retry failed: %v", err)
 	}
@@ -238,22 +227,15 @@ func TestRestoreRetainsRecordOnFailure(t *testing.T) {
 }
 
 // TestRecoverLeftoverStateRestoresAfterKill simulates a helper that was
-// SIGKILLed mid-session: the record (DNS + device) outlives the process and
-// the next instance must restore it before serving.
+// SIGKILLed mid-session: the record (per-link DNS + device) outlives the
+// process and the next instance must restore it before serving.
 func TestRecoverLeftoverStateRestoresAfterKill(t *testing.T) {
 	f := newApplyFixture(t)
 	uid := f.uid
-	line := "nameserver 10.22.4.2"
-	if err := os.WriteFile(f.resolv, []byte(line+"\n"+f.original), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	record := &ownedState{
 		Version: stateVersion, UID: uid, PID: os.Getpid(),
 		Device: &deviceInfo{Name: "tun-crashed", Index: 9999}, // nonexistent device
-		DNS: &dnsOwnership{
-			Mode: dnsModeFile, ResolvPath: f.resolv, Inserted: line,
-			Original: []string{"nameserver 10.0.0.1", "nameserver 10.0.0.2"},
-		},
+		DNS:    &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-crashed", Peer: "10.22.4.2"},
 	}
 	if err := saveState(record); err != nil {
 		t.Fatal(err)
@@ -261,51 +243,11 @@ func TestRecoverLeftoverStateRestoresAfterKill(t *testing.T) {
 	if err := recoverLeftoverState(uid); err != nil {
 		t.Fatalf("leftover recovery failed: %v", err)
 	}
-	data, err := os.ReadFile(f.resolv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != f.original {
-		t.Fatalf("the crashed helper's DNS edit was not withdrawn: %q", string(data))
+	if len(f.withdrawn) != 1 || f.withdrawn[0].Iface != "tun-crashed" {
+		t.Fatalf("the crashed helper's per-link DNS was not withdrawn: %+v", f.withdrawn)
 	}
 	if state, err := loadState(uid); err != nil || state != nil {
 		t.Fatalf("the recovered record was not cleared: %v %+v", err, state)
-	}
-}
-
-// TestRecoverLeftoverStateRestoresRemovedNameservers covers DNS entries that
-// were already present before the connection and were removed while the
-// capture owned the file.
-func TestRecoverLeftoverStateRestoresRemovedNameservers(t *testing.T) {
-	f := newApplyFixture(t)
-	uid := f.uid
-	line := "nameserver 10.22.4.2"
-	if err := os.WriteFile(f.resolv, []byte(line+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	record := &ownedState{
-		Version: stateVersion, UID: uid, PID: os.Getpid(),
-		DNS: &dnsOwnership{
-			Mode: dnsModeFile, ResolvPath: f.resolv, Inserted: line,
-			Original: []string{"nameserver 10.0.0.1", "nameserver 10.0.0.2"},
-		},
-	}
-	if err := saveState(record); err != nil {
-		t.Fatal(err)
-	}
-	if err := recoverLeftoverState(uid); err != nil {
-		t.Fatalf("leftover recovery failed: %v", err)
-	}
-	data, err := os.ReadFile(f.resolv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "nameserver 10.0.0.1") || !strings.Contains(content, "nameserver 10.0.0.2") {
-		t.Fatalf("pre-connection nameserver entries were not preserved: %q", content)
-	}
-	if strings.Contains(content, line) {
-		t.Fatalf("the owned nameserver line survived the restore: %q", content)
 	}
 }
 
@@ -316,14 +258,12 @@ func TestRecoverLeftoverStateBlocksOnFailedRestore(t *testing.T) {
 	uid := f.uid
 	record := &ownedState{
 		Version: stateVersion, UID: uid, PID: os.Getpid(),
-		DNS: &dnsOwnership{
-			Mode: dnsModeFile, ResolvPath: filepath.Join(f.resolv, "missing-parent"), Inserted: "nameserver 10.22.4.2",
-			Original: []string{"nameserver 10.0.0.1"},
-		},
+		DNS: &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-crashed", Peer: "10.22.4.2"},
 	}
 	if err := saveState(record); err != nil {
 		t.Fatal(err)
 	}
+	f.withdrawErr = errors.New("resolvectl revert refused")
 	if err := recoverLeftoverState(uid); err == nil {
 		t.Fatal("an unrestorable record must fail the recovery")
 	}
@@ -338,7 +278,7 @@ func TestApplyRefusesWhileRecordRetained(t *testing.T) {
 	f := newApplyFixture(t)
 	record := &ownedState{
 		Version: stateVersion, UID: f.uid, PID: os.Getpid(),
-		DNS: &dnsOwnership{Mode: dnsModeFile, ResolvPath: f.resolv, Inserted: "nameserver 10.22.4.2"},
+		DNS: &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-fake", Peer: "10.22.4.2"},
 	}
 	if err := saveState(record); err != nil {
 		t.Fatal(err)
@@ -356,16 +296,9 @@ func TestApplyRefusesWhileRecordRetained(t *testing.T) {
 // and reports the DNS mode only afterwards.
 func TestServeProbeCleansLeftoverRecord(t *testing.T) {
 	f := newApplyFixture(t)
-	line := "nameserver 10.22.4.2"
-	if err := os.WriteFile(f.resolv, []byte(line+"\n"+f.original), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	record := &ownedState{
 		Version: stateVersion, UID: f.uid, PID: os.Getpid(),
-		DNS: &dnsOwnership{
-			Mode: dnsModeFile, ResolvPath: f.resolv, Inserted: line,
-			Original: []string{"nameserver 10.0.0.1"},
-		},
+		DNS: &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-crashed", Peer: "10.22.4.2"},
 	}
 	if err := saveState(record); err != nil {
 		t.Fatal(err)
@@ -376,12 +309,11 @@ func TestServeProbeCleansLeftoverRecord(t *testing.T) {
 	if reply.Status != statusOK {
 		t.Fatalf("probe with a cleanable leftover record failed: %+v", reply)
 	}
-	data, err := os.ReadFile(f.resolv)
-	if err != nil {
-		t.Fatal(err)
+	if len(f.withdrawn) != 1 {
+		t.Fatalf("the probe did not withdraw the leftover per-link DNS: %+v", f.withdrawn)
 	}
-	if strings.Contains(string(data), line) {
-		t.Fatalf("the probe did not withdraw the leftover DNS edit: %q", string(data))
+	if state, err := loadState(f.uid); err != nil || state != nil {
+		t.Fatalf("the probe left the recovered record behind: %v %+v", err, state)
 	}
 	client.send(t, envelope(opClose))
 	if reply := client.receive(t); reply.Status != statusOK {
@@ -396,13 +328,12 @@ func TestServeProbeFailsWhileRecordUnrestorable(t *testing.T) {
 	f := newApplyFixture(t)
 	record := &ownedState{
 		Version: stateVersion, UID: f.uid, PID: os.Getpid(),
-		DNS: &dnsOwnership{
-			Mode: dnsModeFile, ResolvPath: filepath.Join(f.resolv, "blocked"), Inserted: "nameserver 10.22.4.2",
-		},
+		DNS: &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-crashed", Peer: "10.22.4.2"},
 	}
 	if err := saveState(record); err != nil {
 		t.Fatal(err)
 	}
+	f.withdrawErr = errors.New("resolvectl revert refused")
 	client, _ := newTestClient(t)
 	client.send(t, envelope(opProbe))
 	reply := client.receive(t)

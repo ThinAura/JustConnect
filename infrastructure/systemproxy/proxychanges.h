@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include <QTimer>
 #include <functional>
 #include <memory>
 
@@ -13,6 +14,9 @@ public:
     // Linux-only test seams: the CI image has no dconf session, so tests inject
     // a snapshot reader and drive notifications directly.
     void setSnapshotReader(std::function<QByteArray()> reader);
+    // One GSettings notification. Batches the signal with the others of a
+    // write burst into a single snapshot read.
+    void noteSignal();
     void handleSignal();
 #endif
 signals:
@@ -20,4 +24,7 @@ signals:
 private:
     struct Watch;
     std::unique_ptr<Watch> watch;
+#ifdef Q_OS_LINUX
+    QTimer batch;
+#endif
 };

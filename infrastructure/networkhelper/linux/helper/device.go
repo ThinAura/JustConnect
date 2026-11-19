@@ -365,17 +365,50 @@ func deleteRoutePayload(dstLen, table byte) []byte {
 	return rt[:]
 }
 
+// routeAddFlags frames the RTM_NEWROUTE request. Exclusive: the helper must
+// never silently replace a row another tool installed; a collision surfaces
+// as EEXIST and is resolved by ownership verification below.
+const routeAddFlags = unix.NLM_F_REQUEST | unix.NLM_F_ACK | unix.NLM_F_CREATE | unix.NLM_F_EXCL
+
 func (c *netlinkConn) addRoute(index int, prefix netip.Prefix) error {
 	attrs := append(ip4attr(unix.RTA_DST, prefix.Addr()),
 		u32attr(unix.RTA_OIF, uint32(index))...)
-	msg := netlinkMessage(unix.RTM_NEWROUTE,
-		unix.NLM_F_REQUEST|unix.NLM_F_ACK|unix.NLM_F_CREATE|unix.NLM_F_REPLACE,
+	msg := netlinkMessage(unix.RTM_NEWROUTE, routeAddFlags,
 		c.nextSeq(), routePayload(byte(prefix.Bits()), unix.RT_TABLE_MAIN), attrs)
 	err := c.transact("route add "+prefix.String(), msg)
-	if errors.Is(err, unix.EEXIST) {
+	if !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+	// A route to this destination already exists. It may only be the helper's
+	// own leftover row (same destination, main table, pointing at the owned
+	// device — exactly what sweepRoutes removes), so re-connecting after a
+	// crash succeeds. A route added by another tool must survive connect and
+	// disconnect: the collision fails instead of replacing or sweeping it.
+	rib, dumpErr := syscall.NetlinkRIB(unix.RTM_GETROUTE, unix.AF_INET)
+	if dumpErr != nil {
+		return fmt.Errorf("route add %s: inspect the conflicting route: %w", prefix, dumpErr)
+	}
+	if routeOwned(rib, index, prefix) {
 		return nil
 	}
-	return err
+	return fmt.Errorf("route add %s: destination already routed by another owner and was left untouched", prefix)
+}
+
+// routeOwned reports whether the RIB holds a main-table route for exactly
+// prefix whose outbound interface is the owned device — a row the helper
+// installed (or inherited from its own crashed instance).
+func routeOwned(rib []byte, index int, prefix netip.Prefix) bool {
+	targets, err := dumpRoutes(rib, index)
+	if err != nil {
+		return false
+	}
+	for _, target := range targets {
+		if target.table == unix.RT_TABLE_MAIN && target.hasDst &&
+			netip.PrefixFrom(target.dst, int(target.dstLen)) == prefix {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *netlinkConn) delRoute(index int, prefix netip.Prefix) error {

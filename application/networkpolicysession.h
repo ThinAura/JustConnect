@@ -27,6 +27,10 @@ public:
     void setPolicyApplier(const QString &generation, PolicyApplier applier);
     void completePolicy(const QString &generation, const QString &revision, CoreEngine::RequestStatus status);
     bool refresh();
+    // Observation entry point: refreshes immediately when idle, otherwise
+    // coalesces the change into one queued follow-up instead of dropping it
+    // (publish() drains the queue once the busy flags clear).
+    void requestRefresh();
     CoreEngine::RequestStatus synchronizeProtection();
     bool setCampusAddress(const QString &address, bool campus);
     bool setCampusName(const QString &name, bool campus);

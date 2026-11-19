@@ -35,7 +35,7 @@ MacNetworkAccess::MacNetworkAccess(CoreEngine *core,NetworkPolicySession *policy
     connect(policy,&NetworkPolicySession::changed,this,&MacNetworkAccess::prepareConfiguration);
     connect(policy,&NetworkPolicySession::changed,this,&MacNetworkAccess::observeModel,Qt::QueuedConnection);
     observation.setInterval(2000);
-    connect(&observation,&QTimer::timeout,this,[this] { if (stage == Stage::Ready && !this->policy->isBusy()) this->policy->refresh(); });
+    connect(&observation,&QTimer::timeout,this,[this] { if (stage == Stage::Ready) this->policy->requestRefresh(); });
     connect(&worker,&QFutureWatcher<MacHelperPreparation>::finished,this,[this] {
         preparing = false;
         if (stage == Stage::Stopping) { driveStop(); return; }

@@ -147,16 +147,20 @@ func addresses(index int) (netip.Addr, netip.Addr, error) {
 }
 
 func (d *Device) Read(packet []byte) (int, error) {
-	n, err := d.File.Read(packet)
-	if err != nil {
-		return 0, err
+	for {
+		n, err := d.File.Read(packet)
+		if err != nil {
+			return 0, err
+		}
+		// IPv4 only: the helper installs no IPv6 address, so the core also
+		// never offers IPv6 forwarding on this device. Unsupported frames are
+		// dropped and the read continues, so one stray packet cannot end the
+		// shared read loop with EINVAL.
+		if n < 20 || packet[0]>>4 != 4 {
+			continue
+		}
+		return n, nil
 	}
-	// IPv4 only: the helper installs no IPv6 address, so the core also never
-	// offers IPv6 forwarding on this device.
-	if n < 20 || packet[0]>>4 != 4 {
-		return 0, unix.EINVAL
-	}
-	return n, nil
 }
 
 func (d *Device) Write(packet []byte) (int, error) {

@@ -140,3 +140,64 @@ func TestRoutePayloadShape(t *testing.T) {
 		t.Fatalf("unexpected scope/type: %v", payload)
 	}
 }
+
+// Exclusive adds replace nothing: a row installed by another tool must
+// survive connect and disconnect, so the request carries EXCL and never
+// REPLACE, and collisions are resolved by ownership verification.
+func TestRouteAddFlagsAreExclusive(t *testing.T) {
+	if routeAddFlags&unix.NLM_F_REPLACE != 0 {
+		t.Fatal("route adds carry NLM_F_REPLACE and would replace foreign routes")
+	}
+	if routeAddFlags&unix.NLM_F_EXCL == 0 || routeAddFlags&unix.NLM_F_CREATE == 0 {
+		t.Fatal("route adds must request an exclusive create")
+	}
+}
+
+func TestRouteOwnedVerifiesCollisionOwnership(t *testing.T) {
+	dst := netip.MustParseAddr("10.50.0.0")
+	prefix := netip.PrefixFrom(dst, 16)
+	owned := []byte(nil)
+	owned = append(owned, encodeRouteRow(9, dst, 16, unix.RT_TABLE_MAIN)...)
+	if !routeOwned(owned, 9, prefix) {
+		t.Fatal("the helper's own leftover row is not recognized as owned")
+	}
+
+	// A foreign route to the same destination on another interface: the
+	// collision must not be accepted as owned.
+	foreign := []byte(encodeRouteRow(7, dst, 16, unix.RT_TABLE_MAIN))
+	if routeOwned(foreign, 9, prefix) {
+		t.Fatal("a foreign route on another interface was accepted as owned")
+	}
+
+	// Same device, different destination length: not the same row.
+	wider := []byte(encodeRouteRow(9, dst, 8, unix.RT_TABLE_MAIN))
+	if routeOwned(wider, 9, prefix) {
+		t.Fatal("a different prefix length was accepted as owned")
+	}
+
+	// Same device and destination but a non-main table: sweepRoutes only
+	// removes rows the dump attributes to the device, and this one lives in a
+	// table the helper never writes.
+	otherTable := []byte(encodeRouteRow(9, dst, 16, 42))
+	if routeOwned(otherTable, 9, prefix) {
+		t.Fatal("a route in another table was accepted as owned")
+	}
+
+	// A default route pointing at the device carries no destination; it must
+	// not shadow the owned row that follows it in the same dump.
+	var header [16]byte
+	binary.LittleEndian.PutUint16(header[4:6], unix.RTM_NEWROUTE)
+	rt := routePayload(0, unix.RT_TABLE_MAIN)
+	rt[0] = unix.AF_INET
+	record := append(rt[:], u32attr(unix.RTA_OIF, 9)...)
+	binary.LittleEndian.PutUint32(header[0:4], uint32(16+len(record)))
+	rib := append(append(header[:], record...), encodeRouteRow(9, dst, 16, unix.RT_TABLE_MAIN)...)
+	if !routeOwned(rib, 9, prefix) {
+		t.Fatal("a destination-less route hid the helper's own row")
+	}
+
+	// No matching row at all: a collision the helper cannot attribute.
+	if routeOwned([]byte(encodeRouteRow(9, netip.MustParseAddr("10.60.0.0"), 16, unix.RT_TABLE_MAIN)), 9, prefix) {
+		t.Fatal("a different destination was accepted as owned")
+	}
+}

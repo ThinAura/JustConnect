@@ -4,109 +4,60 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestInsertResolvNameserverPrependsOnce(t *testing.T) {
+// Automatic routing has exactly one supported DNS mechanism: an active
+// systemd-resolved. Anything else must fail detectability before a connection
+// starts, so the application can explain the requirement.
+func TestDetectDNSModeRequiresActiveResolved(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "resolv.conf")
-	original := "# comment\nnameserver 192.168.1.1\nsearch example.edu\n"
-	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("nameserver 192.168.1.1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	line := "nameserver 10.22.4.2"
-	if _, err := insertResolvNameserverAt(path, line); err != nil {
-		t.Fatalf("insert: %v", err)
+	_, err := detectDNSModeAt(path)
+	if err == nil || !strings.Contains(err.Error(), "systemd-resolved") {
+		t.Fatalf("a plain resolv.conf must be rejected: %v", err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := line + "\n" + original
-	if string(data) != want {
-		t.Fatalf("content %q, expected %q", data, want)
-	}
-	// Idempotent: the same peer inserts nothing.
-	if _, err := insertResolvNameserverAt(path, line); err != nil {
-		t.Fatalf("reinsert: %v", err)
-	}
-	data, _ = os.ReadFile(path)
-	if string(data) != want {
-		t.Fatalf("reinsert changed the file to %q", data)
-	}
-	if err := removeResolvNameserver(path, line); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	data, _ = os.ReadFile(path)
-	if string(data) != original {
-		t.Fatalf("restore left %q, expected the original content", data)
-	}
-}
-
-func TestRemoveResolvNameserverToleratesMissing(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "resolv.conf")
-	if err := os.WriteFile(path, []byte("nameserver 192.168.1.1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeResolvNameserver(path, "nameserver 10.22.4.2"); err != nil {
-		t.Fatalf("removing a foreign line must be a no-op: %v", err)
-	}
-	data, _ := os.ReadFile(path)
-	if string(data) != "nameserver 192.168.1.1\n" {
-		t.Fatalf("file changed to %q", data)
-	}
-	if err := removeResolvNameserver(filepath.Join(dir, "missing.conf"), "nameserver 1.2.3.4"); err != nil {
-		t.Fatalf("missing file must be tolerated: %v", err)
-	}
-}
-
-func TestWriteResolvFilePreservesMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "resolv.conf")
-	if err := os.WriteFile(path, []byte("nameserver 192.168.1.1\n"), 0640); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeResolvFile(path, "nameserver 10.22.4.2\n", info); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	after, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Mode().Perm() != 0640 {
-		t.Fatalf("mode changed to %v", after.Mode().Perm())
-	}
-	data, _ := os.ReadFile(path)
-	if !strings.HasPrefix(string(data), "nameserver 10.22.4.2\n") {
-		t.Fatalf("unexpected content %q", data)
-	}
-}
-
-func TestDetectDNSModeFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "resolv.conf")
-	if err := os.WriteFile(path, []byte("nameserver 192.168.1.1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	mode, err := detectDNSModeAt(path)
-	if err != nil {
-		t.Fatalf("detect: %v", err)
-	}
-	if mode != dnsModeFile {
-		t.Fatalf("mode %q, expected %q", mode, dnsModeFile)
-	}
-}
-
-func TestDetectDNSModeMissingFile(t *testing.T) {
-	if _, err := detectDNSModeAt(filepath.Join(t.TempDir(), "resolv.conf")); err == nil {
+	if _, err := detectDNSModeAt(filepath.Join(dir, "missing.conf")); err == nil {
 		t.Fatal("a missing resolv.conf must be reported as unusable")
+	}
+}
+
+func TestDetectDNSModeAcceptsStubAndRunDirectory(t *testing.T) {
+	originalRunDir, originalLookPath := resolvedRunDir, lookPath
+	t.Cleanup(func() { resolvedRunDir, lookPath = originalRunDir, originalLookPath })
+	lookPath = func(string) (string, error) { return "/usr/bin/resolvectl", nil }
+
+	// The stub nameserver marks an active resolved even when the file is not
+	// the runtime symlink.
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "resolv.conf")
+	if err := os.WriteFile(stub, []byte(resolvedStubLine+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if mode, err := detectDNSModeAt(stub); err != nil || mode != dnsModeResolved {
+		t.Fatalf("stub detection produced %q, %v", mode, err)
+	}
+
+	// The resolved runtime directory layout also counts, stub or not.
+	resolvedRunDir = dir
+	runtime := filepath.Join(dir, "stub.conf")
+	if err := os.WriteFile(runtime, []byte("nameserver 10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if mode, err := detectDNSModeAt(runtime); err != nil || mode != dnsModeResolved {
+		t.Fatalf("runtime-directory detection produced %q, %v", mode, err)
+	}
+
+	// A missing resolvectl makes an active resolved unusable.
+	lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	if _, err := detectDNSModeAt(runtime); err == nil || !strings.Contains(err.Error(), "resolvectl") {
+		t.Fatalf("missing resolvectl must be reported: %v", err)
 	}
 }
 

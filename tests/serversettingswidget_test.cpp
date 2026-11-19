@@ -58,8 +58,9 @@ int main(int argc,char **argv) {
     check(routingWarning && routingWarning->isVisibleTo(&editor) && !routingWarning->text().isEmpty(),
         "automatic routing explains its authorization or the missing host setup");
     if (routingWarning->text().contains("not installed as a root-owned"))
-        check(routingWarning->text().contains("sudo chown root:root") && routingWarning->text().contains("sudo chmod 0755"),
-            "a missing helper names its exact repair commands");
+        check(routingWarning->text().contains("root-owned executable")
+            && routingWarning->text().contains("setup-network-helper"),
+            "a missing helper names its protected location and the system installer");
     mode->setCurrentIndex(1);
     check(routingWarning->isHidden(),"local proxy mode hides the automatic routing notice");
     localPort->setValue(32081);

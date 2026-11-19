@@ -6,7 +6,10 @@ NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHel
 {
     if (!canonicalUnicastIpv4(configuration.address) || !canonicalUnicastIpv4(configuration.peer)
         || device.name.isEmpty() || device.name.size() > 15 || device.index <= 0) return {};
-    if (!dnsMode.isEmpty() && dnsMode != QLatin1String("resolved") && dnsMode != QLatin1String("file")) return {};
+    // Automatic routing supports exactly one DNS mechanism: per-link settings
+    // on the owned TUN link of an active systemd-resolved. There is no plain
+    // resolv.conf fallback to describe.
+    if (!dnsMode.isEmpty() && dnsMode != QLatin1String("resolved")) return {};
     return [configuration, device, dnsMode](const QJsonObject &network, const QJsonObject &dns, QString *reason)
         -> std::optional<NetworkPolicySession::OriginalView> {
         const auto fail = [reason](const QString &detail) {
@@ -47,41 +50,62 @@ NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHel
         original["interfaces"] = interfaces;
         original["routes"] = routes;
         auto originalDns = dns;
-        if (dnsMode == QLatin1String("file")) {
-            // The helper prepended exactly one nameserver line; withdraw the
-            // peer from the observed view. It must still lead the list for
-            // campus names to win.
-            const auto resolvConf = dns["resolv_conf"].toObject();
-            if (!resolvConf["nameservers"].isArray())
-                return fail(QStringLiteral("the resolv_conf snapshot lost its nameserver list"));
-            QJsonArray nameservers;
+        if (dnsMode == QLatin1String("resolved")) {
+            // JustConnect's own resolver is exactly one per-link entry: the
+            // servers and routing domains the helper installed on the TUN
+            // link with resolvectl. Subtract that whole entry so the
+            // original-network snapshot keeps only pre-existing resolver
+            // state — a foreign split-DNS domain on another link survives.
+            const auto resolved = dns["resolved"].toObject();
+            if (!resolved["links"].isArray())
+                return fail(QStringLiteral("the per-link resolver snapshot lost its link list"));
+            QJsonArray links;
             bool owned = false;
-            for (const auto &value : resolvConf["nameservers"].toArray()) {
-                if (value.toString() == configuration.peer) {
+            for (const auto &value : resolved["links"].toArray()) {
+                const auto row = value.toObject();
+                if (row["interface"].toString() == device.name && row["index"].toInt() == device.index) {
+                    if (owned)
+                        return fail(QStringLiteral("the owned tunnel device %1 is duplicated in the resolver snapshot").arg(device.name));
                     owned = true;
                     continue;
                 }
-                nameservers.append(value);
+                links.append(value);
             }
             if (!owned)
-                return fail(QStringLiteral("the owned nameserver is missing from resolv_conf"));
-            auto updated = resolvConf;
-            updated["nameservers"] = nameservers;
-            originalDns["resolv_conf"] = updated;
+                return fail(QStringLiteral("the owned per-link resolver is missing from the resolved snapshot"));
+            auto updated = resolved;
+            updated["links"] = links;
+            originalDns["resolved"] = updated;
         }
-        // "resolved" keeps per-link settings outside the resolv.conf snapshot;
-        // an empty mode means this session owns no DNS at all.
+        // An empty mode means this session owns no DNS at all.
         return NetworkPolicySession::OriginalView{original, originalDns};
     };
 }
 
-bool linuxOriginalDnsMatches(const LinuxHelperConfiguration &configuration, const QString &dnsMode,
-    const QJsonObject &dns)
+bool linuxOriginalDnsMatches(const LinuxHelperConfiguration &configuration, const LinuxHelperDevice &device,
+    const QString &dnsMode, const QJsonObject &dns)
 {
-    if (dnsMode.isEmpty() || dnsMode == QLatin1String("resolved")) return true;
-    if (dnsMode != QLatin1String("file")) return false;
-    const auto resolvConf = dns["resolv_conf"].toObject();
-    if (!resolvConf["nameservers"].isArray()) return false;
-    // The inserted peer must still be the first nameserver.
-    return resolvConf["nameservers"].toArray().at(0).toString() == configuration.peer;
+    if (dnsMode.isEmpty()) return true;
+    if (dnsMode != QLatin1String("resolved")) return false;
+    const auto resolved = dns["resolved"].toObject();
+    if (!resolved["links"].isArray()) return true; // no per-link snapshot to judge
+    for (const auto &value : resolved["links"].toArray()) {
+        const auto row = value.toObject();
+        if (row["interface"].toString() == device.name && row["index"].toInt() == device.index) {
+            // The peer must still lead the owned link's servers, and every
+            // installed routing domain must survive; a mismatch means campus
+            // name resolution cannot work anymore.
+            const auto servers = row["servers"].toArray();
+            if (servers.isEmpty() || servers.at(0).toString() != configuration.peer) return false;
+            const auto domains = row["domains"].toArray();
+            for (const auto &domain : configuration.dnsDomains) {
+                const auto marked = QStringLiteral("~") + domain;
+                bool installed = false;
+                for (const auto &entry : domains) installed |= entry.toString() == marked || entry.toString() == domain;
+                if (!installed) return false;
+            }
+            return true;
+        }
+    }
+    return false; // the owned link vanished from the resolver state
 }

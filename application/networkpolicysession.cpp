@@ -155,6 +155,21 @@ bool NetworkPolicySession::refresh()
     return true;
 }
 
+void NetworkPolicySession::requestRefresh()
+{
+    if (localProxy || !engine || generation.isEmpty()) return;
+    // A change observed while a refresh (or a native policy write) runs must
+    // not be lost, but it must not multiply either: one queued follow-up
+    // coalesces every observation made while this one is outstanding, and
+    // publish() drains it once the busy flags clear. An explicit refresh()
+    // from the retry path keeps its immediate, refusing semantics.
+    if (isBusy()) {
+        refreshQueued = true;
+        return;
+    }
+    refresh();
+}
+
 CoreEngine::RequestStatus NetworkPolicySession::synchronizeProtection()
 {
     if (!engine || generation.isEmpty() || isBusy() || currentStatus != Status::Success

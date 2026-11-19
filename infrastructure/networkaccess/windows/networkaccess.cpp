@@ -41,7 +41,7 @@ WindowsNetworkAccess::WindowsNetworkAccess(CoreEngine *core,NetworkPolicySession
     connect(policy,&NetworkPolicySession::changed,this,&WindowsNetworkAccess::prepareConfiguration);
     connect(policy,&NetworkPolicySession::changed,this,&WindowsNetworkAccess::observeModel,Qt::QueuedConnection);
     observation.setInterval(2000);
-    connect(&observation,&QTimer::timeout,this,[this]{if(stage==Stage::Ready && !this->policy->isBusy())this->policy->refresh();});
+    connect(&observation,&QTimer::timeout,this,[this]{if(stage==Stage::Ready)this->policy->requestRefresh();});
     connect(&preparation,&QFutureWatcher<WindowsHelperPreparation>::finished,this,[this]{
         preparing=false;
         if(stage==Stage::Stopping){driveStop();return;}

@@ -28,11 +28,15 @@ QStringList watchedResolverPaths()
         if (info.exists() || info.isSymLink()) paths.append(path);
     }
     if (QDir(QStringLiteral("/run/systemd/resolve")).exists()) paths.append(QStringLiteral("/run/systemd/resolve"));
+    // The parent directory catches the recreation half of a resolver swap
+    // (write to a temporary file, rename over the watched path), which the
+    // per-file watch reports only as a removal.
+    if (paths.contains(QStringLiteral("/etc/resolv.conf"))) paths.append(QStringLiteral("/etc"));
     return paths;
 }
 }
 
-LinuxNetworkMonitor::LinuxNetworkMonitor(int monitorFd, QObject *parent)
+LinuxNetworkMonitor::LinuxNetworkMonitor(int monitorFd, QObject *parent, const QStringList &resolverPaths)
     : QObject(parent)
 {
     int fd = monitorFd;
@@ -55,11 +59,24 @@ LinuxNetworkMonitor::LinuxNetworkMonitor(int monitorFd, QObject *parent)
     coalesce.setInterval(CoalesceMs);
     connect(&coalesce, &QTimer::timeout, this, &LinuxNetworkMonitor::networkChanged);
 
-    const auto paths = watchedResolverPaths();
+    const auto paths = resolverPaths.isEmpty() ? watchedResolverPaths() : resolverPaths;
     if (!paths.isEmpty()) {
-        connect(&files, &QFileSystemWatcher::fileChanged, this, [this](const QString &) { schedule(); });
-        connect(&files, &QFileSystemWatcher::directoryChanged, this, [this](const QString &) { schedule(); });
+        watchPaths = paths;
+        connect(&files, &QFileSystemWatcher::fileChanged, this, [this](const QString &) {
+            schedule();
+            rearmResolverWatch();
+            // The replacement may land after this removal event; one retry
+            // re-arms a file that reappears without a directory event.
+            watchRetry.start();
+        });
+        connect(&files, &QFileSystemWatcher::directoryChanged, this, [this](const QString &) {
+            schedule();
+            rearmResolverWatch();
+        });
         files.addPaths(paths);
+        watchRetry.setSingleShot(true);
+        watchRetry.setInterval(CoalesceMs);
+        connect(&watchRetry, &QTimer::timeout, this, [this] { rearmResolverWatch(); });
     }
 }
 
@@ -79,4 +96,16 @@ void LinuxNetworkMonitor::schedule()
         }
     }
     coalesce.start();
+}
+
+void LinuxNetworkMonitor::rearmResolverWatch()
+{
+    // QFileSystemWatcher silently stops watching a file that is replaced (the
+    // resolver swap deletes the watched inode and creates a new one), so a
+    // resolver substitution would otherwise end auto-refreshing. Re-arm every
+    // intended watch that is back on disk; addPath on a still-watched path is
+    // a no-op, and a path not yet recreated is caught by its directory watch
+    // or the retry timer.
+    for (const auto &candidate : watchPaths)
+        if (QFileInfo::exists(candidate)) files.addPath(candidate);
 }

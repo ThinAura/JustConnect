@@ -1,5 +1,8 @@
 #include "infrastructure/systemproxy/proxychanges.h"
 #include <QByteArray>
+#include <QCoreApplication>
+#include <QDeadlineTimer>
+#include <QEventLoop>
 #include <iostream>
 #include <stdexcept>
 
@@ -10,7 +13,8 @@ namespace {
 void check(bool okay, const char *message) { if (!okay) throw std::runtime_error(message); }
 }
 
-int main() try {
+int main(int argc, char **argv) try {
+    QCoreApplication app(argc, argv);
     ProxyChanges silent;
     int silentEvents = 0;
     QObject::connect(&silent, &ProxyChanges::changed, [&] { ++silentEvents; });
@@ -46,6 +50,16 @@ int main() try {
         "org.gnome.system.proxy.http/host=proxy2.example\n";
     watched.handleSignal();
     check(events == 3, "Change after a failed read was not reported");
+
+    // The real notification path batches a write burst before reading: the
+    // burst opens one window and collapses into a single read and emission.
+    snapshot = "org.gnome.system.proxy/mode='none'\n";
+    watched.noteSignal(); watched.noteSignal(); watched.noteSignal();
+    QDeadlineTimer deadline(2000);
+    while (events < 4 && !deadline.hasExpired())
+        app.processEvents(QEventLoop::AllEvents, 20);
+    check(events == 4, "A batched notification burst reported more than one change");
+    check(!deadline.hasExpired(), "The batched notification burst was never delivered");
     std::cout << "proxychanges_linux_test passed" << std::endl;
     return 0;
 } catch (const std::exception &error) {

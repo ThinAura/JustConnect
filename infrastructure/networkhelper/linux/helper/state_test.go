@@ -33,7 +33,7 @@ func TestStateRoundTrip(t *testing.T) {
 		Device:   &deviceInfo{Name: "tun9", Index: 9, MTU: 1400, Address: "10.22.4.1", Peer: "10.22.4.2"},
 		Prefixes: []string{"10.50.0.0/16"},
 		Dynamic:  []string{"10.50.1.5/32"},
-		DNS:      &dnsOwnership{Mode: dnsModeFile, ResolvPath: "/etc/resolv.conf", Inserted: "nameserver 10.22.4.2"},
+		DNS:      &dnsOwnership{Mode: dnsModeResolved, Iface: "tun9", Peer: "10.22.4.2"},
 	}
 	if err := saveState(state); err != nil {
 		t.Fatalf("save: %v", err)
@@ -48,7 +48,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if len(loaded.Prefixes) != 1 || loaded.Prefixes[0] != "10.50.0.0/16" {
 		t.Fatalf("prefixes lost: %+v", loaded)
 	}
-	if loaded.DNS == nil || loaded.DNS.Inserted != "nameserver 10.22.4.2" {
+	if loaded.DNS == nil || loaded.DNS.Iface != "tun9" || loaded.DNS.Peer != "10.22.4.2" {
 		t.Fatalf("dns record lost: %+v", loaded)
 	}
 	if err := clearState(1000); err != nil {
