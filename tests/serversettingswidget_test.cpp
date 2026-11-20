@@ -50,6 +50,8 @@ int main(int argc,char **argv) {
     auto *extraRoutes=editor.findChild<QPlainTextEdit *>("clashTargetsEdit");
     for(auto *field:QList<QWidget *>{address,port,mode}) {
         auto *label=qobject_cast<QLabel *>(form->labelForField(field));
+        if (label && std::abs(label->geometry().center().y()-field->geometry().center().y())>1)
+            qWarning() << field->objectName() << label->geometry() << field->geometry();
         check(label && label->buddy()==field && std::abs(label->geometry().center().y()-field->geometry().center().y())<=1,
             "server address and port labels are centered beside their styled fields");
     }

@@ -83,6 +83,7 @@ bool PresentationHelpers::actionPrompt(QWidget *parent,const QString &title,cons
     auto *dismissButton = buttons->button(dismiss);
     dismissButton->setProperty("promptPrimary",false);
     for (auto *button : {primaryButton,dismissButton}) {
+        button->setIcon({});
         button->setAutoDefault(false);
         // The button box may have queried the style before assigning these roles.
         button->style()->unpolish(button);

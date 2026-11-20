@@ -66,8 +66,9 @@ ServerSettingsWidget::ServerSettingsWidget(QWidget *parent) : QWidget(parent) {
     connect(routingMode,&QComboBox::currentIndexChanged,this,&ServerSettingsWidget::updateRoutingFields);
     for(auto *field:QList<QWidget *>{address,port,routingMode,socksPort,httpPort}) {
         auto *label=new QLabel(this);label->setBuddy(field);
-        // QFormLayout otherwise caps label height at 7/4 of its text height, above our taller inputs.
         label->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Expanding);
+        field->ensurePolished();
+        label->setMinimumHeight(qBound(field->minimumHeight(), field->sizeHint().height(), field->maximumHeight()));
         form->addRow(label,field);
     }
     layout->addLayout(form);
