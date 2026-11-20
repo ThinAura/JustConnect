@@ -58,6 +58,15 @@ helper_path="/usr/libexec/justconnect-network-helper"
 grep -q "$helper_path" "$policy" || { echo "polkit policy does not annotate $helper_path; configure with -DCMAKE_INSTALL_PREFIX=/usr" >&2; exit 1; }
 grep -rq "$helper_path" "$stage/usr/bin/JustConnect" || { echo "application does not embed $helper_path; configure with -DCMAKE_INSTALL_PREFIX=/usr" >&2; exit 1; }
 
+# Release payloads carry no debug sections: the Go core's DWARF dominates the
+# installed size otherwise. --strip-debug keeps dynamic symbols (and the Go
+# runtime's pclntab), so the payload still launches against system libraries.
+if command -v strip >/dev/null; then
+    while IFS= read -r -d '' object; do
+        [ "$(head -c 4 "$object")" = $'\x7fELF' ] && strip --strip-debug "$object"
+    done < <(find "$stage/usr" -type f -print0)
+fi
+
 installed_size="$(du -sk --apparent-size "$stage/usr" | cut -f1)"
 
 mkdir -p "$stage/DEBIAN"
@@ -78,8 +87,7 @@ Description: Connect to aTrust campus VPN gateways
  JustConnect signs in to campus SSO (WebKitGTK browser), routes campus
  traffic through a privileged network helper (polkit) or a local proxy,
  and restores system proxy state after crashes. Saved sign-ins persist
- through the Secret Service keyring (libsecret) with a 0600-file
- fallback when no keyring is available.
+ through the Secret Service keyring when available.
 EOF
 
 # md5sums of the payload, paths relative to the package root.
@@ -91,14 +99,6 @@ find "$stage/usr" -type d -exec chmod 0755 {} +
 chmod 0755 "$stage" "$stage/DEBIAN"
 chmod 0644 "$stage/DEBIAN/control" "$stage/DEBIAN/md5sums"
 
-# Release payloads carry no debug sections: the Go core's DWARF dominates the
-# installed size otherwise. --strip-debug keeps dynamic symbols (and the Go
-# runtime's pclntab), so the payload still launches against system libraries.
-if command -v strip >/dev/null; then
-    while IFS= read -r -d '' object; do
-        [ "$(head -c 4 "$object")" = $'\x7fELF' ] && strip --strip-debug "$object"
-    done < <(find "$stage/usr" -type f -print0)
-fi
 
 dpkg-deb --build --root-owner-group "$stage" "$output" 1>&2
 echo "$output"

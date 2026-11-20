@@ -6,10 +6,7 @@ application start, polkit (`pkexec`) asks for the administrator password, and
 the helper installs campus routes plus split DNS for the lifetime of the
 session. Split DNS needs an active systemd-resolved; hosts that resolve names
 another way are reported before connecting and automatic mode stays
-unavailable. **Local proxy only** needs no privileges. Everything
-else — sign-in (including the SSO browser), saved credentials, system proxy
-hand-off and recovery, Clash coexistence — behaves like the Windows and macOS
-builds.
+unavailable. **Local proxy only** needs no privileges. See [runtime notes](#runtime-notes) for desktop and keyring requirements.
 
 ## Prerequisites
 
@@ -25,10 +22,7 @@ builds.
 | patchelf | any | only needed for the portable tarball |
 | dpkg-dev | any | only needed for the Debian package (`dpkg-deb`) |
 
-On Ubuntu 24.04 (glibc 2.39) the distribution Qt is 6.4 — too old. Install Qt
-6.8+ from the Qt SDK instead (see below). Package builds target Ubuntu 24.04
-as the runtime floor; older distributions need newer glibc/fontconfig than
-they ship.
+On Ubuntu 24.04, install Qt 6.8 or later from the Qt SDK. The portable build targets Ubuntu 24.04. The Debian package uses Debian 13 system libraries.
 
 ### Distribution packages
 
@@ -74,12 +68,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
 cmake --build build
 ```
 
-Run the test suite (Qt tests use the `offscreen` platform; the sign-in browser
-tests that drive WebKitGTK need a real X11 session and report SKIP without
-one):
+Run the test suite in an X11 session or with Xvfb for the WebKitGTK sign-in browser checks.
 
 ```sh
-QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
+xvfb-run -a ctest --test-dir build --output-on-failure
 ```
 
 ## Install
@@ -121,41 +113,18 @@ the password prompt.
 
 ## Package (Debian)
 
-The Debian package ships the minimal payload and declares the distribution
-libraries as package dependencies:
+Build with Debian 13 system libraries. The same script runs in CI for both
+previews and releases.
 
 ```sh
-cmake -S . -B build-deb -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build build-deb
-./scripts/package-deb.sh build-deb justconnect_$(git describe --tags --match 'v*' |
-  sed -e 's/^v//' -e 's/-[0-9]*-g[0-9a-f]*$//')-1_amd64.deb
+docker run --rm -v "$PWD":/justconnect -w /justconnect debian:13 \
+  bash scripts/build-debian-package.sh "" justconnect.deb
 ```
 
-Install it with `sudo apt install ./justconnect_<version>_amd64.deb`. The
-prefix must stay `/usr`: the helper path is compiled into the application and
-annotated in the polkit policy (`/usr/libexec/justconnect-network-helper`),
-and `dpkg` delivers the helper root-owned, which is exactly what `pkexec`
-requires. The payload is `usr/bin/JustConnect`,
-`usr/bin/JustConnectProxyRecovery` (system proxy crash recovery, located next
-to the application binary), `usr/libexec/justconnect-network-helper`, the
-polkit policy, the desktop entry and icon, and license documents. Everything
-else — Qt, WebKitGTK for the sign-in browser, libsecret for the keyring,
-`pkexec`, dconf — is declared in `Depends:`; `fonts-dejavu-core` is a
-`Recommends` for rendering on minimal systems. Versions that do not start
-with a digit — nightly identifiers such as `f70134c-nightly` — are normalized
-to `0.0.0~<version>`, which Debian's version ordering keeps below every real
-release. CI (`.github/workflows/build.yml`) runs these same steps and
-publishes the `.deb` next to the portable tarball.
-
-To build a .deb for release:
-
-```sh
-cmake -S . -B build-deb -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF -DGIT_HASH="$revision"
-cmake --build build-deb --config Release --parallel "$(nproc)"
-./scripts/package-deb.sh build-deb "$output" "$version"
-```
+Install with `sudo apt install ./justconnect.deb`. APT installs the runtime
+libraries, including Qt and WebKitGTK. The package installs the root-owned
+helper and its polkit action. CI verifies the package in a fresh Debian 13
+container before uploading it.
 
 ## Package (portable tarball)
 
@@ -206,8 +175,8 @@ the extracted tree.
 - **System proxy** integration drives gsettings/dconf (`org.gnome.system.proxy`).
   It applies when a compatible desktop session is present; without one, the
   backend reports unsupported and local proxy keeps working.
-- **Credential storage** uses libsecret when available and falls back to a
-  0600 file next to the app data otherwise.
+- **Credential storage** uses a Secret Service keyring through libsecret.
+  Without a usable keyring, saved sign-ins stay in the running app's memory.
 - **DNS for automatic routing** installs per-link split DNS on an active
   systemd-resolved only; there is no plain `resolv.conf` fallback.
 - **Autostart** writes an XDG autostart entry under `$XDG_CONFIG_HOME`.

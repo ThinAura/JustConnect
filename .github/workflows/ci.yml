@@ -38,9 +38,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgl1-mesa-dev libegl-dev libxkbcommon-dev libfontconfig1-dev \
-            libnss3-dev libxcomposite-dev libxcursor-dev libxi-dev libxtst-dev \
-            libxrandr-dev libdrm-dev libgbm-dev libasound2-dev libatspi2.0-dev \
-            libwebkit2gtk-4.1-dev xvfb xauth
+            libwebkit2gtk-4.1-dev libssl-dev libx11-dev xvfb xauth
 
       - name: Install Qt
         uses: ./.github/actions/setup-qt
@@ -64,7 +62,12 @@ jobs:
           CGO_ENABLED: '0'
           GOTOOLCHAIN: local
           GOWORK: 'off'
-        run: go -C infrastructure/networkhelper/linux/helper test -mod=readonly -count=1 -timeout 120s ./...
+        run: |
+          helper=infrastructure/networkhelper/linux/helper
+          go -C "$helper" test -mod=readonly -count=1 -timeout 120s ./...
+          probe="$RUNNER_TEMP/justconnect-linux-netlink-tests"
+          go -C "$helper" test -mod=readonly -c -o "$probe"
+          sudo unshare --net -- env JC_LINUX_HELPER_NETNS=1 "$probe" -test.run '^TestNetlink.*Runner$' -test.v
 
       - name: Configure
         shell: bash

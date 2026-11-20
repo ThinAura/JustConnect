@@ -45,7 +45,7 @@ Always remember your saved sign-in between launches. As long as it’s still val
 | --- | --- |
 | **Windows** · x64 or ARM64 | Run the installer, or extract the portable ZIP and open `JustConnect.exe`. |
 | **macOS** · 14.4 or later, Apple silicon or Intel | Open the DMG and drag JustConnect into Applications. |
-| **Linux** · x64 | Extract the tarball and run `bin/JustConnect`. Both routing modes work; automatic (TUN) routing additionally needs its privileged helper installed once into a root-owned system directory — run `sudo ./setup-network-helper.sh` inside the extracted package (the app names the same steps when the helper is missing). See [build-linux.md](build-linux.md) to build from source. |
+| **Linux** · x64 | On Debian 13, install the package with `sudo apt install ./JustConnect-…-linux-x64.deb`. With the portable tarball, extract it and run `bin/JustConnect`. For automatic routing, install the portable helper with `sudo ./setup-network-helper.sh`. See the [Linux requirements and build guide](build-linux.md). |
 
 Windows installers are unsigned, so Windows may show a warning.
 
