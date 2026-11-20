@@ -43,15 +43,19 @@ int main(int argc, char **argv) {
     const auto parsed = parseResolvedPerLinkStatus(status);
     check(parsed.has_value(), "resolvectl status fixture did not parse");
     const auto links = parsed->value("links").toArray();
-    check(links.size() == 2, "the fixture's per-link entries were not all captured");
-    const auto wan = links.at(0).toObject();
+    check(links.size() == 3, "the fixture's global and per-link entries were not all captured");
+    const auto global = links.at(0).toObject();
+    check(global["index"] == 0 && global["default_route"] == true
+        && global["servers"].toArray().contains("223.5.5.5") && !global["servers"].toArray().contains("202.120.224.26"),
+        "global and fallback servers were combined");
+    const auto wan = links.at(1).toObject();
     check(wan["interface"] == "enp3s0" && wan["index"] == 2, "the first link identity was misread");
     const auto servers = wan["servers"].toArray();
     check(servers.contains("116.228.111.118") && servers.contains("180.168.255.18"),
         "an indented DNS Servers label lost its servers");
     check(servers.contains("240e:58:c000:1600:180:168:255:118"), "wrapped IPv6 continuation rows were dropped");
     check(wan["domains"].toArray().isEmpty(), "an absent DNS Domain label invented domains");
-    const auto tun = links.at(1).toObject();
+    const auto tun = links.at(2).toObject();
     check(tun["interface"] == "jctun0" && tun["index"] == 42, "the owned tunnel identity was misread");
     check(tun["servers"].toArray().contains("10.8.0.1"), "the owned tunnel's servers were dropped");
     const auto domains = tun["domains"].toArray();

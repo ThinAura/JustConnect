@@ -364,6 +364,21 @@ static void preparationChecks()
     check(literals && literals->at(0).toObject()["servers"].toArray() == QJsonArray{
             QJsonValue("[2001:db8::1]:53"), QJsonValue("10.0.0.9:53")},
         QStringLiteral("Original DNS endpoints lost their canonical addr:port form"));
+    const QJsonObject splitDns{{"resolved", QJsonObject{{"links", QJsonArray{
+        QJsonObject{{"default_route", true}, {"servers", QJsonArray{"10.0.0.1"}}, {"domains", QJsonArray{}}},
+        QJsonObject{{"servers", QJsonArray{"100.100.100.100"}}, {"domains", QJsonArray{"~campus.example.test"}}},
+        QJsonObject{{"servers", QJsonArray{"10.0.0.9"}}, {"domains", QJsonArray{"lab.campus.example.test"}}},
+    }}}}};
+    const auto scoped = linuxOriginalDnsSources(splitDns, QJsonArray{
+        QJsonObject{{"kind", "suffix"}, {"value", "campus.example.test"}},
+        QJsonObject{{"kind", "exact"}, {"value", "node.lab.campus.example.test"}},
+        QJsonObject{{"kind", "single_label"}, {"value", ""}},
+    });
+    check(scoped && scoped->size() == 3
+        && scoped->at(0).toObject()["servers"].toArray() == QJsonArray{"100.100.100.100:53"}
+        && scoped->at(1).toObject()["servers"].toArray() == QJsonArray{"10.0.0.9:53"}
+        && scoped->at(2).toObject()["servers"].toArray() == QJsonArray{"10.0.0.9:53"},
+        QStringLiteral("Split DNS names were forwarded to the wrong resolvers"));
 }
 
 static void ownershipChecks()
@@ -444,14 +459,8 @@ static void ownershipChecks()
     unlisted["resolved"] = QJsonObject{{"global", true}};
     check(!filter(network, unlisted, &reason) && reason.contains("link list"),
         QStringLiteral("A resolver snapshot without a link list kept a resolved-mode view"));
-    check(linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), dns)
-        && linuxOriginalDnsMatches(configuration, device, QString(), QJsonObject{}),
-        QStringLiteral("Matching DNS ownership was rejected"));
-    // A demoted server list, a lost routing domain or a vanished owned link
-    // must stop matching.
-    auto reordered = dns;
-    resolved = reordered["resolved"].toObject();
-    auto replaceOwnedLink = [&resolved](const std::function<void(QJsonObject &)> &change) {
+    auto withOwnedLink = [&dns](const std::function<void(QJsonObject &)> &change) {
+        auto resolved = dns["resolved"].toObject();
         QJsonArray rows;
         for (const auto &value : resolved["links"].toArray()) {
             auto row = value.toObject();
@@ -459,25 +468,20 @@ static void ownershipChecks()
             rows.append(row);
         }
         resolved["links"] = rows;
+        auto updated = dns;
+        updated["resolved"] = resolved;
+        return updated;
     };
-    replaceOwnedLink([](QJsonObject &row) { row["servers"] = QJsonArray{QJsonValue("10.0.0.1"), QJsonValue("198.18.0.2")}; });
-    reordered["resolved"] = resolved;
-    auto demoted = dns;
-    resolved = demoted["resolved"].toObject();
-    replaceOwnedLink([](QJsonObject &row) { row["domains"] = QJsonArray{QJsonValue("~other.example")}; });
-    demoted["resolved"] = resolved;
-    auto vanished = dns;
-    resolved = vanished["resolved"].toObject();
-    QJsonArray remaining;
-    for (const auto &value : resolved["links"].toArray())
-        if (value.toObject()["interface"] != "jc0") remaining.append(value);
-    resolved["links"] = remaining;
-    vanished["resolved"] = resolved;
-    check(!linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), reordered)
-        && !linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), demoted)
-        && !linuxOriginalDnsMatches(configuration, device, QStringLiteral("resolved"), vanished)
-        && !linuxOriginalDnsMatches(configuration, device, QStringLiteral("dhcp"), QJsonObject{}),
-        QStringLiteral("Lost DNS ownership still matched"));
+    const auto addedServer = withOwnedLink([](QJsonObject &row) {
+        row["servers"] = QJsonArray{"198.18.0.2", "10.0.0.1"};
+    });
+    const auto searchDomain = withOwnedLink([](QJsonObject &row) { row["domains"] = QJsonArray{"campus.example.test"}; });
+    const auto extraScope = withOwnedLink([](QJsonObject &row) {
+        row["domains"] = QJsonArray{"~campus.example.test", "~."};
+    });
+    check(!filter(network, addedServer, &reason) && !filter(network, searchDomain, &reason)
+        && !filter(network, extraScope, &reason),
+        QStringLiteral("A change to the owned DNS servers or route-only domains was hidden"));
 }
 
 static void clientScenarios()
@@ -542,7 +546,7 @@ static void clientScenarios()
             QStringLiteral("Capture replacement did not complete"));
         const auto restore = awaitStep(helper, "authorized restore", [&] { helper.restore(); });
         check(restore.finished && restore.finished->succeeded() && helper.state() == LinuxNetworkHelperClient::State::Idle
-            && helper.descriptor() == -1 && !helper.ownedDevice(),
+            && helper.descriptor() == -1 && !helper.ownedDevice() && !helper.restorationPending(),
             QStringLiteral("Restore did not withdraw the owned session"));
         const auto probedAgain = awaitStep(helper, "reused probe", [&] { helper.inspect(QUuid::createUuid()); });
         check(probedAgain.finished && probedAgain.finished->succeeded() && launches == 1,
@@ -578,8 +582,8 @@ static void clientScenarios()
             QTimer::singleShot(150, &helper, [&helper] { helper.cancel(); });
         });
         check(apply.finished && apply.finished->status == PlatformOperationResult::Status::Cancelled
-            && helper.state() == LinuxNetworkHelperClient::State::Idle && launches == 1,
-            QStringLiteral("Cancelled apply did not return to a clean state"));
+            && helper.state() == LinuxNetworkHelperClient::State::Idle && helper.restorationPending() && launches == 1,
+            QStringLiteral("Cancelled apply released unconfirmed ownership"));
         fake.join();
     }
     // A helper that dies while owning state surfaces ownershipLost; the reply
@@ -614,11 +618,17 @@ static void clientScenarios()
         QObject::disconnect(lostConnection);
         check(step.finished && step.finished->succeeded() && step.lost && step.lost->mayHaveChanged
             && helper.state() == LinuxNetworkHelperClient::State::Idle && helper.descriptor() == -1
-            && launches == 1,
+            && helper.restorationPending() && launches == 1,
             QStringLiteral("Helper death did not report apply success and ownership loss (finished=%1 lost=%2 state=%3 descriptor=%4)")
                 .arg(step.finished.has_value() ? QStringLiteral("yes") : QStringLiteral("no"),
                     step.lost.has_value() ? QStringLiteral("yes") : QStringLiteral("no"),
                     QString::number(int(helper.state())), QString::number(helper.descriptor())));
+        fake.join();
+        const auto recovered = awaitStep(helper, "replacement helper confirmed recovery", [&] { helper.inspect(QUuid::createUuid()); });
+        check(recovered.finished && recovered.finished->succeeded() && !helper.restorationPending() && launches == 2,
+            QStringLiteral("Recovery could not be confirmed by a replacement helper"));
+        const auto close = awaitStep(helper, "close replacement helper", [&] { helper.close(); });
+        check(close.finished && close.finished->succeeded(), QStringLiteral("Closing the replacement helper failed"));
         fake.join();
     }
 }

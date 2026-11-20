@@ -10,7 +10,10 @@ NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHel
     // on the owned TUN link of an active systemd-resolved. There is no plain
     // resolv.conf fallback to describe.
     if (!dnsMode.isEmpty() && dnsMode != QLatin1String("resolved")) return {};
-    return [configuration, device, dnsMode](const QJsonObject &network, const QJsonObject &dns, QString *reason)
+    QStringList installedDomains;
+    for (const auto &domain : configuration.dnsDomains) installedDomains.append(QChar('~') + domain);
+    installedDomains.sort();
+    return [device, dnsMode, peer = configuration.peer, installedDomains](const QJsonObject &network, const QJsonObject &dns, QString *reason)
         -> std::optional<NetworkPolicySession::OriginalView> {
         const auto fail = [reason](const QString &detail) {
             if (reason) *reason = detail;
@@ -51,11 +54,7 @@ NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHel
         original["routes"] = routes;
         auto originalDns = dns;
         if (dnsMode == QLatin1String("resolved")) {
-            // JustConnect's own resolver is exactly one per-link entry: the
-            // servers and routing domains the helper installed on the TUN
-            // link with resolvectl. Subtract that whole entry so the
-            // original-network snapshot keeps only pre-existing resolver
-            // state — a foreign split-DNS domain on another link survives.
+            // Verify the owned DNS scopes before projecting the original network.
             const auto resolved = dns["resolved"].toObject();
             if (!resolved["links"].isArray())
                 return fail(QStringLiteral("the per-link resolver snapshot lost its link list"));
@@ -66,6 +65,12 @@ NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHel
                 if (row["interface"].toString() == device.name && row["index"].toInt() == device.index) {
                     if (owned)
                         return fail(QStringLiteral("the owned tunnel device %1 is duplicated in the resolver snapshot").arg(device.name));
+                    QStringList domains;
+                    for (const auto &entry : row["domains"].toArray()) domains.append(entry.toString());
+                    domains.sort();
+                    if (row["default_route"].toBool() || row["servers"].toArray() != QJsonArray{peer}
+                        || domains != installedDomains)
+                        return fail(QStringLiteral("the owned per-link resolver settings changed"));
                     owned = true;
                     continue;
                 }
@@ -80,32 +85,4 @@ NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHel
         // An empty mode means this session owns no DNS at all.
         return NetworkPolicySession::OriginalView{original, originalDns};
     };
-}
-
-bool linuxOriginalDnsMatches(const LinuxHelperConfiguration &configuration, const LinuxHelperDevice &device,
-    const QString &dnsMode, const QJsonObject &dns)
-{
-    if (dnsMode.isEmpty()) return true;
-    if (dnsMode != QLatin1String("resolved")) return false;
-    const auto resolved = dns["resolved"].toObject();
-    if (!resolved["links"].isArray()) return true; // no per-link snapshot to judge
-    for (const auto &value : resolved["links"].toArray()) {
-        const auto row = value.toObject();
-        if (row["interface"].toString() == device.name && row["index"].toInt() == device.index) {
-            // The peer must still lead the owned link's servers, and every
-            // installed routing domain must survive; a mismatch means campus
-            // name resolution cannot work anymore.
-            const auto servers = row["servers"].toArray();
-            if (servers.isEmpty() || servers.at(0).toString() != configuration.peer) return false;
-            const auto domains = row["domains"].toArray();
-            for (const auto &domain : configuration.dnsDomains) {
-                const auto marked = QStringLiteral("~") + domain;
-                bool installed = false;
-                for (const auto &entry : domains) installed |= entry.toString() == marked || entry.toString() == domain;
-                if (!installed) return false;
-            }
-            return true;
-        }
-    }
-    return false; // the owned link vanished from the resolver state
 }

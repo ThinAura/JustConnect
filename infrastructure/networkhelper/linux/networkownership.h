@@ -11,8 +11,3 @@
 // the borrowed descriptor either way.
 NetworkPolicySession::OriginalViewFilter linuxOriginalNetworkView(const LinuxHelperConfiguration &configuration,
     const LinuxHelperDevice &device, const QString &dnsMode);
-
-// True while the host's DNS snapshot still matches the ownership the helper
-// installed; a mismatch means campus name resolution cannot work anymore.
-bool linuxOriginalDnsMatches(const LinuxHelperConfiguration &configuration, const LinuxHelperDevice &device,
-    const QString &dnsMode, const QJsonObject &dns);

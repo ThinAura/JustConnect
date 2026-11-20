@@ -133,6 +133,11 @@ void LinuxNetworkHelperClient::inspect(const QUuid &id)
             QStringLiteral("Previous helper interaction is incomplete."), true});
         return;
     }
+    if (!helperAlive && process.state() != QProcess::NotRunning) {
+        emit finished(Operation::Inspect, {PlatformOperationResult::Status::Failed,
+            QStringLiteral("The previous network helper is still exiting. Retry recovery."), restorationPending_});
+        return;
+    }
     attempt_ = id;
     if (helperAlive && connectionFd >= 0) {
         // The authorized helper from a previous session still runs; probe it
@@ -343,6 +348,7 @@ void LinuxNetworkHelperClient::handleReply(const QJsonObject &packet)
     switch (state_) {
     case State::Inspecting:
         dnsMode_ = parseLinuxHelperDnsMode(packet);
+        if (result->succeeded()) restorationPending_ = false;
         setState(State::Idle);
         emit finished(operation, *result);
         return;
@@ -381,8 +387,8 @@ void LinuxNetworkHelperClient::handleReply(const QJsonObject &packet)
         // withdraw it. Returning to the active state keeps that retry possible;
         // dropping to Idle here would leave every later apply answered with
         // "a capture is already active" until the helper process restarts.
-        setState(!result->succeeded() && result->status != PlatformOperationResult::Status::Cancelled
-            ? State::Active : State::Idle);
+        if (result->succeeded()) restorationPending_ = false;
+        setState(result->succeeded() ? State::Idle : State::Active);
         emit finished(operation, *result);
         return;
     case State::Idle:
@@ -448,6 +454,7 @@ void LinuxNetworkHelperClient::apply(const QUuid &id, const LinuxHelperConfigura
         return;
     }
     appliedConfiguration = configuration;
+    restorationPending_ = true;
     owner_ = id;
     request_ = QUuid::createUuid();
     currentOperation = Operation::Apply;

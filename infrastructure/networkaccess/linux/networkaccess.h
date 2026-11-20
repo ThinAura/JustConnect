@@ -6,7 +6,6 @@
 #include "infrastructure/networkhelper/linux/networkhelperpreparation.h"
 #include <QFutureWatcher>
 #include <QLockFile>
-#include <QTimer>
 
 // Automatic (TUN) network access on Linux through the privileged helper:
 // pkexec authorizes one helper process per application launch, the helper
@@ -41,6 +40,5 @@ private:
     QJsonObject changingPolicy, originalExit;
     QStringList nextCapture;
     Stage stage = Stage::Idle;
-    QTimer restoreRetry;
     bool preparing = false, attaching = false, automaticPolicy = false;
 };

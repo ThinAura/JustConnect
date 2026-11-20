@@ -24,7 +24,9 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
         if (state != HelperState::Idle && state != HelperState::Active) this->policy->setNetworkBusy(generation, true);
     });
     connect(&helper, &LinuxNetworkHelperClient::ownershipLost, this, [this](Result result) {
-        if (stage == Stage::Ready || stage == Stage::Updating) {
+        if (stage == Stage::Activating) {
+            stage = Stage::Prepared; emit ready(attempt, result);
+        } else if (stage == Stage::Ready || stage == Stage::Updating) {
             stage = Stage::Prepared; emit lost(attempt, result);
         }
     });
@@ -40,14 +42,8 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
     // snapshot per change; an unchanged connection requests none.
     monitor = new LinuxNetworkMonitor(-1, this);
     connect(monitor, &LinuxNetworkMonitor::networkChanged, this, [this, policy] {
-        if (stage == Stage::Ready) policy->requestRefresh();
-    });
-    // A failed restore keeps the helper's ownership record; the session stays
-    // in Stopping and retries the cleanup until it succeeds, which blocks a
-    // new connection in the meantime.
-    restoreRetry.setSingleShot(true);
-    connect(&restoreRetry, &QTimer::timeout, this, [this] {
-        if (stage == Stage::Stopping && helper.state() == HelperState::Active) helper.restore();
+        if (stage == Stage::Ready || stage == Stage::Updating || (stage == Stage::Activating && helper.restorationPending()))
+            policy->requestRefresh();
     });
     connect(&worker, &QFutureWatcher<LinuxHelperPreparation>::finished, this, [this] {
         preparing = false;
@@ -141,7 +137,7 @@ void LinuxNetworkAccess::prepareConfiguration()
 void LinuxNetworkAccess::helperFinished(Operation operation, Result result)
 {
     if (stage == Stage::Stopping) {
-        if (!result.succeeded() && result.status != Status::Cancelled) {
+        if (!result.succeeded() && (result.status != Status::Cancelled || operation == Operation::Inspect)) {
             stage = Stage::Prepared; emit stopped(attempt, result); return;
         }
         driveStop(); return;
@@ -189,9 +185,7 @@ void LinuxNetworkAccess::observeModel()
     const auto model = policy->model();
     const auto exit = originalExitSnapshot(model["network"].toObject(), model["resources"].toObject()["underlay_interface"].toString());
     const auto owned = helper.ownedConfiguration();
-    const auto ownedDevice = helper.ownedDevice();
-    if (!exit || *exit != originalExit || (owned && ownedDevice
-        && !linuxOriginalDnsMatches(*owned, *ownedDevice, helper.dnsMode(), model["dns"].toObject()))) {
+    if (!exit || *exit != originalExit) {
         stage = Stage::Prepared; emit restartRequired(attempt, QStringLiteral("Original network exit changed; restoring before reconnecting.")); return;
     }
     const auto update = owned ? updatedLinuxCapturePrefixes(model["resources"].toObject(), policy->confirmedProtection(), *owned,
@@ -247,6 +241,11 @@ void LinuxNetworkAccess::driveStop()
     if (stage != Stage::Stopping || preparing) return;
     switch (helper.state()) {
     case HelperState::Idle:
+        if (helper.restorationPending()) {
+            emit quiesced(attempt);
+            helper.inspect(attempt);
+            return;
+        }
         lock.reset(); stage = Stage::Idle; generation.clear(); changingPolicy = {}; nextCapture.clear(); originalExit = {};
         attaching = automaticPolicy = false;
         emit stopped(attempt, {}); return;

@@ -2,15 +2,15 @@
 #include "application/campuscapture.h"
 #include <QHostAddress>
 #include <QNetworkInterface>
+#include <algorithm>
 
 namespace {
 // resolv.conf nameservers speak plain DNS on the standard port; rows carry
 // the "addr:port" endpoint form the campus capture planner and the core
 // accept (brackets for IPv6 literals).
-QStringList linuxOriginalDnsEndpoints(const QJsonObject &dns)
+QStringList linuxOriginalDnsEndpoints(const QJsonArray &nameservers)
 {
     QStringList endpoints;
-    const auto nameservers = dns["resolv_conf"].toObject()["nameservers"].toArray();
     for (const auto &value : nameservers) {
         if (!value.isString()) continue;
         const QHostAddress address(value.toString());
@@ -22,16 +22,53 @@ QStringList linuxOriginalDnsEndpoints(const QJsonObject &dns)
     }
     return endpoints;
 }
+
+QStringList resolvedEndpoints(const QJsonArray &links, const QJsonObject &rule)
+{
+    const auto kind = rule["kind"].toString();
+    const auto name = rule["value"].toString();
+    QStringList endpoints;
+    qsizetype best = -1;
+    for (const auto &entry : links) {
+        const auto link = entry.toObject();
+        qsizetype match = link["default_route"].toBool() && kind != "single_label" ? 0 : -1;
+        for (const auto &domain : link["domains"].toArray()) {
+            auto scope = domain.toString().toLower();
+            const bool routeOnly = scope.startsWith(QChar('~'));
+            if (routeOnly) scope.remove(0, 1);
+            if (scope == ".") {
+                if (kind != "single_label") match = std::max<qsizetype>(match, 1);
+                continue;
+            }
+            if (scope.endsWith('.')) scope.chop(1);
+            if (scope.isEmpty() || scope == ".") continue;
+            if (kind == "single_label" && !routeOnly) match = 1;
+            else if ((kind == "exact" || kind == "suffix") && (name == scope || name.endsWith('.' + scope)))
+                match = std::max(match, scope.size() + 1);
+        }
+        if (match < 0 || match < best) continue;
+        const auto servers = linuxOriginalDnsEndpoints(link["servers"].toArray());
+        if (match > best) endpoints.clear();
+        endpoints += servers;
+        best = match;
+    }
+    endpoints.removeDuplicates();
+    return endpoints;
+}
 }
 
 std::optional<QJsonArray> linuxOriginalDnsSources(const QJsonObject &dns, const QJsonArray &required)
 {
     if (required.isEmpty()) return QJsonArray{};
-    const auto endpoints = linuxOriginalDnsEndpoints(dns);
-    if (endpoints.isEmpty()) return std::nullopt;
+    const auto resolved = dns["resolved"].toObject().value("links");
+    if (dns.contains("resolved") && !resolved.isArray()) return std::nullopt;
+    const auto fallback = resolved.isArray() ? QStringList{}
+        : linuxOriginalDnsEndpoints(dns["resolv_conf"].toObject()["nameservers"].toArray());
     QJsonArray sources;
     for (const auto &rule : required) {
         if (!rule.isObject()) return std::nullopt;
+        const auto endpoints = resolved.isArray() ? resolvedEndpoints(resolved.toArray(), rule.toObject()) : fallback;
+        if (endpoints.isEmpty()) return std::nullopt;
         const QJsonObject row{{"name", rule}, {"servers", QJsonArray::fromStringList(endpoints)}};
         if (!sources.contains(row)) sources.append(row);
     }

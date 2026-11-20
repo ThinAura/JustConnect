@@ -9,7 +9,7 @@
 #include <optional>
 
 namespace {
-constexpr int MaxNameservers = 64, MaxSearchDomains = 64, MaxTokenBytes = 255, MaxLinks = 64;
+constexpr int MaxSearchDomains = 64, MaxTokenBytes = 255, MaxLinks = 64;
 
 struct ResolvConf { QStringList nameservers, search; QString domain; };
 
@@ -72,28 +72,31 @@ std::optional<QJsonObject> readResolvedPerLink(const QString &program)
 std::optional<QJsonObject> parseResolvedPerLinkStatus(const QString &status)
 {
     QJsonArray links;
-    int index = 0;
+    int index = -1;
     QString interface;
     QJsonArray servers, domains;
     QString continuation;
-    bool overflow = false;
+    bool overflow = false, defaultRoute = false, valid = true;
     const auto appendToken = [](QJsonArray &list, const QString &token, bool *overflow) {
-        if (list.contains(token) || token.size() > MaxTokenBytes || token.contains(QChar(0))) return;
-        if (list.size() >= MaxSearchDomains) { *overflow = true; return; }
+        if (list.contains(token)) return;
+        if (list.size() >= MaxSearchDomains || token.size() > MaxTokenBytes || token.contains(QChar(0))) {
+            *overflow = true; return;
+        }
         list.append(token);
     };
     const auto flush = [&]() {
-        // Only links with actual DNS state are worth snapshotting; an
-        // overflowing link is dropped rather than trusted incomplete.
-        if (index > 0 && !overflow && (servers.size() || domains.size()) && links.size() < MaxLinks)
-            links.append(QJsonObject{{"index", index}, {"interface", interface},
-                {"servers", servers}, {"domains", domains}});
-        index = 0;
+        if (index >= 0 && (overflow || !servers.isEmpty() || !domains.isEmpty())) {
+            if (overflow || links.size() >= MaxLinks) valid = false;
+            else links.append(QJsonObject{{"index", index}, {"interface", interface},
+                {"servers", servers}, {"domains", domains}, {"default_route", index == 0 || defaultRoute}});
+        }
+        index = -1;
         interface.clear();
         servers = QJsonArray();
         domains = QJsonArray();
         continuation.clear();
         overflow = false;
+        defaultRoute = false;
     };
     const auto accept = [&](const QString &key, const QString &value) {
         if (key == QStringLiteral("DNS Servers")) {
@@ -106,9 +109,17 @@ std::optional<QJsonObject> parseResolvedPerLinkStatus(const QString &status)
                 appendToken(domains, token, &overflow);
         } else {
             continuation.clear();
+            if (key == QStringLiteral("Protocols"))
+                defaultRoute = value.split(' ', Qt::SkipEmptyParts).contains(QStringLiteral("+DefaultRoute"));
+            else if (key == QStringLiteral("Default Route")) defaultRoute = value == QStringLiteral("yes");
         }
     };
     for (auto line : status.split('\n')) {
+        if (line == QStringLiteral("Global")) {
+            flush();
+            index = 0;
+            continue;
+        }
         const auto header = LinkHeader.match(line);
         if (header.hasMatch()) {
             flush();
@@ -133,6 +144,7 @@ std::optional<QJsonObject> parseResolvedPerLinkStatus(const QString &status)
         continuation.clear();
     }
     flush();
+    if (!valid) return std::nullopt;
     return QJsonObject{{"links", links}};
 }
 

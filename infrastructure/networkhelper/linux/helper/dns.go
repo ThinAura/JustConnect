@@ -14,12 +14,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -81,6 +83,9 @@ func applyDNS(ownership *dnsOwnership) error {
 	if ownership.Mode != dnsModeResolved {
 		return fmt.Errorf("unsupported DNS mode %q", ownership.Mode)
 	}
+	if err := runCommand("resolvectl", "default-route", ownership.Iface, "false"); err != nil {
+		return fmt.Errorf("exclude the campus resolver from ordinary DNS: %w", err)
+	}
 	if err := runCommand("resolvectl", "dns", ownership.Iface, ownership.Peer); err != nil {
 		return fmt.Errorf("set per-link DNS server: %w", err)
 	}
@@ -133,7 +138,9 @@ func ifaceExists(name string) bool {
 }
 
 func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "),
 			err, strings.TrimSpace(string(output)))

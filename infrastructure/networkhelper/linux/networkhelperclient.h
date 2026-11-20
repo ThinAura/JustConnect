@@ -40,11 +40,11 @@ public:
     void cancel();
 
     State state() const;
+    bool restorationPending() const { return restorationPending_; }
     qint32 descriptor() const { return descriptor_; }
     std::optional<LinuxHelperDevice> ownedDevice() const { return ownedDevice_; }
     std::optional<LinuxHelperConfiguration> ownedConfiguration() const { return ownedConfiguration_; }
-    // DNS mechanism the helper reported for the owned session
-    // ("resolved", "file", or empty when the session owns none).
+    // DNS mechanism the helper reported for the owned session.
     QString dnsMode() const { return dnsMode_; }
     QUuid owner() const { return owner_; }
     qint64 helperPID() const;
@@ -85,6 +85,7 @@ private:
     Operation currentOperation = Operation::Inspect;
     bool helperAlive = false;
     bool closeRequested = false;
+    bool restorationPending_ = false;
     // Frame reassembly: expected==0 collects the 4-byte big-endian length
     // header, then the whole frame into buffer.
     QByteArray buffer;

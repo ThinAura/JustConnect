@@ -512,7 +512,7 @@ func (s *helperSession) reconcile(request *request) error {
 func (s *helperSession) restore() error {
 	state := s.state
 	if state == nil {
-		return nil
+		return s.recoverLeftoverForSession()
 	}
 	var problems []string
 	if err := withdrawDNSFn(state.DNS); err != nil {

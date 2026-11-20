@@ -49,10 +49,16 @@ DnsMechanism detectDnsMechanism(QString *detail)
 
 bool executableByPkexec(const QFileInfo &info)
 {
-    // pkexec refuses programs it does not own and rejects group/other-writable
-    // ones; mirror that so the UI can explain the problem up front.
-    return info.isFile() && info.isExecutable() && info.ownerId() == 0
-        && !(info.permissions() & (QFile::WriteGroup | QFile::WriteOther));
+    const auto protectedEntry = [](const QFileInfo &entry) {
+        return !entry.isSymLink() && entry.ownerId() == 0
+            && !(entry.permissions() & (QFile::WriteGroup | QFile::WriteOther));
+    };
+    if (!info.isFile() || !info.isExecutable() || !protectedEntry(info)) return false;
+    for (auto parent = info.absoluteDir(); ;) {
+        if (!protectedEntry(QFileInfo(parent.absolutePath()))) return false;
+        if (parent.isRoot()) return true;
+        if (!parent.cdUp()) return false;
+    }
 }
 }
 
