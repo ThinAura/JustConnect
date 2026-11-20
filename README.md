@@ -29,7 +29,7 @@ Always remember your saved sign-in between launches. As long as it’s still val
 
 ### Lightweight. Ready to go.
 
-14–22 MiB for the Windows and macOS builds vs. 201–224 MiB for official aTrust client. Get onto your campus network with about a tenth of the download. [The Linux build bundles the Qt runtime and therefore takes up more space than the Windows and macOS builds; its sign-in browser uses the system WebKitGTK.]
+14–22 MiB for the Windows and macOS builds vs. 201–224 MiB for official aTrust client. Get onto your campus network with about a tenth of the download.
 
 ## Screenshots
 
@@ -45,7 +45,7 @@ Always remember your saved sign-in between launches. As long as it’s still val
 | --- | --- |
 | **Windows** · x64 or ARM64 | Run the installer, or extract the portable ZIP and open `JustConnect.exe`. |
 | **macOS** · 14.4 or later, Apple silicon or Intel | Open the DMG and drag JustConnect into Applications. |
-| **Linux** · x64 | Extract the tarball and run `bin/JustConnect`. Both routing modes work; automatic (TUN) routing additionally needs its privileged helper installed once into a root-owned system directory — run `sudo ./setup-network-helper.sh` inside the extracted package (the app names the same steps when the helper is missing). The download is larger than the other platforms because it bundles the Qt runtime; the sign-in browser uses the system WebKitGTK. See [build-linux.md](build-linux.md) to build from source. |
+| **Linux** · x64 | Extract the tarball and run `bin/JustConnect`. Both routing modes work; automatic (TUN) routing additionally needs its privileged helper installed once into a root-owned system directory — run `sudo ./setup-network-helper.sh` inside the extracted package (the app names the same steps when the helper is missing). See [build-linux.md](build-linux.md) to build from source. |
 
 Windows installers are unsigned, so Windows may show a warning.
 
