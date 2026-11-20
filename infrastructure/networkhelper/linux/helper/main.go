@@ -514,35 +514,22 @@ func (s *helperSession) restore() error {
 	if state == nil {
 		return s.recoverLeftoverForSession()
 	}
-	var problems []string
-	if err := withdrawDNSFn(state.DNS); err != nil {
-		problems = append(problems, err.Error())
+	var err error
+	if s.dev != nil {
+		err = errors.Join(withdrawDNSFn(state.DNS), s.dev.withdraw())
+		s.dev = nil
+	} else {
+		err = withdrawRecordedState(state)
 	}
-	if device := state.Device; device != nil {
-		if s.dev != nil {
-			if err := s.dev.withdraw(); err != nil {
-				problems = append(problems, err.Error())
-			}
-			s.dev = nil
-		} else if err := withdrawRecordedState(state); err != nil {
-			problems = append(problems, err.Error())
-		}
-	}
-	if len(problems) > 0 {
+	if err != nil {
 		// Retain the record: a later restore — or the next helper instance
 		// recovering the leftover state — must still see what remains.
-		if err := saveState(state); err != nil {
-			problems = append(problems, err.Error())
-		}
-		return errors.New(strings.Join(problems, "; "))
+		return errors.Join(err, saveState(state))
+	}
+	if err := clearState(s.uid); err != nil {
+		return err
 	}
 	s.state = nil
-	if err := clearState(s.uid); err != nil {
-		problems = append(problems, err.Error())
-	}
-	if len(problems) > 0 {
-		return errors.New(strings.Join(problems, "; "))
-	}
 	return nil
 }
 
@@ -555,33 +542,44 @@ func withdrawRecordedState(state *ownedState) error {
 	if device == nil {
 		return withdrawDNSFn(state.DNS)
 	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Errorf("verify the recorded tunnel interface: %w", err)
+	}
+	found := false
+	for _, iface := range interfaces {
+		if iface.Index == device.Index && iface.Name == device.Name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		// DNS and routes disappear with the original link. A replacement
+		// carrying the old name is outside the recorded ownership.
+		return nil
+	}
 	var problems []string
 	if err := withdrawDNSFn(state.DNS); err != nil {
 		problems = append(problems, err.Error())
 	}
-	iface, err := net.InterfaceByName(device.Name)
-	if err != nil || iface.Index != device.Index {
-		// Device vanished or the index was recycled; skip the device work.
+	nl, err := openNetlink()
+	if err != nil {
+		problems = append(problems, err.Error())
 	} else {
-		nl, err := openNetlink()
-		if err != nil {
+		if err := nl.sweepRoutes(device.Index); err != nil {
 			problems = append(problems, err.Error())
-		} else {
-			if err := nl.sweepRoutes(iface.Index); err != nil {
-				problems = append(problems, err.Error())
-			}
-			if local, err := validateIPv4Unicast(device.Address); err == nil {
-				if peer, err := validateIPv4Unicast(device.Peer); err == nil {
-					if err := nl.delAddress(iface.Index, local, peer); err != nil {
-						problems = append(problems, err.Error())
-					}
+		}
+		if local, err := validateIPv4Unicast(device.Address); err == nil {
+			if peer, err := validateIPv4Unicast(device.Peer); err == nil {
+				if err := nl.delAddress(device.Index, local, peer); err != nil {
+					problems = append(problems, err.Error())
 				}
 			}
-			if err := nl.linkDown(iface.Index); err != nil {
-				problems = append(problems, err.Error())
-			}
-			nl.close()
 		}
+		if err := nl.linkDown(device.Index); err != nil {
+			problems = append(problems, err.Error())
+		}
+		nl.close()
 	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))

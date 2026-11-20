@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"strings"
@@ -226,28 +227,36 @@ func TestRestoreRetainsRecordOnFailure(t *testing.T) {
 	}
 }
 
-// TestRecoverLeftoverStateRestoresAfterKill simulates a helper that was
-// SIGKILLed mid-session: the record (per-link DNS + device) outlives the
-// process and the next instance must restore it before serving.
-func TestRecoverLeftoverStateRestoresAfterKill(t *testing.T) {
-	f := newApplyFixture(t)
-	uid := f.uid
-	record := &ownedState{
-		Version: stateVersion, UID: uid, PID: os.Getpid(),
-		Device: &deviceInfo{Name: "tun-crashed", Index: 9999}, // nonexistent device
-		DNS:    &dnsOwnership{Mode: dnsModeResolved, Iface: "tun-crashed", Peer: "10.22.4.2"},
-	}
-	if err := saveState(record); err != nil {
+func TestRecoverLeftoverStateLeavesOtherInterfacesAlone(t *testing.T) {
+	loopback, err := net.InterfaceByName("lo")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := recoverLeftoverState(uid); err != nil {
-		t.Fatalf("leftover recovery failed: %v", err)
-	}
-	if len(f.withdrawn) != 1 || f.withdrawn[0].Iface != "tun-crashed" {
-		t.Fatalf("the crashed helper's per-link DNS was not withdrawn: %+v", f.withdrawn)
-	}
-	if state, err := loadState(uid); err != nil || state != nil {
-		t.Fatalf("the recovered record was not cleared: %v %+v", err, state)
+	for _, device := range []deviceInfo{
+		{Name: "tun-crashed", Index: loopback.Index},
+		{Name: loopback.Name, Index: loopback.Index + 1},
+	} {
+		t.Run(device.Name, func(t *testing.T) {
+			f := newApplyFixture(t)
+			record := &ownedState{
+				Version: stateVersion, UID: f.uid, PID: os.Getpid(),
+				Device: &device,
+				DNS:    &dnsOwnership{Mode: dnsModeResolved, Iface: device.Name, Peer: "10.22.4.2"},
+			}
+			if err := saveState(record); err != nil {
+				t.Fatal(err)
+			}
+			withdrawDNSFn = func(*dnsOwnership) error {
+				t.Error("attempted to reset DNS without owning the link")
+				return errors.New("unexpected DNS recovery")
+			}
+			if err := recoverLeftoverState(f.uid); err != nil {
+				t.Fatalf("leftover recovery failed: %v", err)
+			}
+			if state := f.record(t); state != nil {
+				t.Fatalf("the record of the removed link was not cleared: %+v", state)
+			}
+		})
 	}
 }
 
@@ -309,9 +318,6 @@ func TestServeProbeCleansLeftoverRecord(t *testing.T) {
 	if reply.Status != statusOK {
 		t.Fatalf("probe with a cleanable leftover record failed: %+v", reply)
 	}
-	if len(f.withdrawn) != 1 {
-		t.Fatalf("the probe did not withdraw the leftover per-link DNS: %+v", f.withdrawn)
-	}
 	if state, err := loadState(f.uid); err != nil || state != nil {
 		t.Fatalf("the probe left the recovered record behind: %v %+v", err, state)
 	}
@@ -320,6 +326,9 @@ func TestServeProbeCleansLeftoverRecord(t *testing.T) {
 		t.Fatalf("close after leftover cleanup: %+v", reply)
 	}
 	client.expectClosed(t)
+	if len(f.withdrawn) != 1 {
+		t.Fatalf("the probe did not withdraw the leftover per-link DNS: %+v", f.withdrawn)
+	}
 }
 
 // TestServeProbeFailsWhileRecordUnrestorable: an unrestorable record keeps

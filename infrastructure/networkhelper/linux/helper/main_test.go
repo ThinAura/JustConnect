@@ -36,19 +36,17 @@ func newTestClient(t *testing.T) (*testClient, *helperSession) {
 	}
 	app := os.NewFile(uintptr(fds[0]), "test-app")
 	server := os.NewFile(uintptr(fds[1]), "test-server")
-	t.Cleanup(func() {
-		app.Close()
-		server.Close()
-	})
 	session := &helperSession{uid: os.Getuid(), pid: os.Getpid()}
 	serveErr := make(chan error, 1)
 	go func() {
+		defer close(serveErr)
+		defer server.Close()
 		serveErr <- serve(server, fds[1], session)
-		server.Close()
 	}()
 	t.Cleanup(func() {
 		app.Close()
 		server.Close()
+		<-serveErr
 	})
 	return &testClient{file: app, serveErr: serveErr}, session
 }
@@ -119,7 +117,8 @@ func (c *testClient) expectCloseWith(t *testing.T, clean bool) {
 		if !clean && serveErr == nil {
 			t.Fatal("protocol corruption was not reported")
 		}
-	default:
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper did not finish")
 	}
 }
 

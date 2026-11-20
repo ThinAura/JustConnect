@@ -106,13 +106,22 @@ func TestNetlinkExclusiveRouteRunner(t *testing.T) {
 		t.Fatalf("the helper's own leftover route was not accepted: %v", err)
 	}
 
-	// Disconnect sweeps only the owned device; the foreign device keeps
-	// whatever routes it holds.
-	if err := owned.dev.nl.sweepRoutes(owned.dev.index); err != nil {
-		t.Fatalf("sweep the owned device: %v", err)
+	foreignRoute := netip.MustParsePrefix("10.80.0.0/16")
+	if err := foreign.dev.nl.addRoute(foreign.dev.index, foreignRoute); err != nil {
+		t.Fatalf("install the unrelated route: %v", err)
+	}
+	record := &ownedState{Device: &deviceInfo{
+		Name: owned.dev.name, Index: owned.dev.index,
+		Address: owned.dev.local.String(), Peer: owned.dev.peer.String(),
+	}}
+	if err := withdrawRecordedState(record); err != nil {
+		t.Fatalf("recover the recorded device: %v", err)
 	}
 	if targets := routesFor(t, owned.dev.index); len(targets) != 0 {
-		t.Fatalf("the owned device still carries routes after the sweep: %+v", targets)
+		t.Fatalf("the owned device still carries routes after recovery: %+v", targets)
+	}
+	if !containsPrefix(routesFor(t, foreign.dev.index), foreignRoute) {
+		t.Fatal("recovery removed the unrelated route")
 	}
 }
 
