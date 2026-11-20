@@ -291,12 +291,12 @@ if(BUILD_TESTING)
     # The package verifier runs this probe against the installed runtime.
     qt_add_executable(signinbrowser_test tests/signinbrowser_test.cpp)
     target_link_libraries(signinbrowser_test PRIVATE justconnect_signin_browser)
-    # The callback frame boundary runs wherever a real X11 session exists and
-    # reports SKIP otherwise (CI has no display; desktop testing runs it).
-    qt_add_executable(signinbrowser_frames_test tests/signinbrowser_frames_test.cpp)
-    target_link_libraries(signinbrowser_frames_test PRIVATE justconnect_signin_browser)
-    add_test(NAME signinbrowser_frames_test COMMAND signinbrowser_frames_test)
-    set_tests_properties(signinbrowser_frames_test PROPERTIES TIMEOUT 120)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        qt_add_executable(signinbrowser_frames_test tests/signinbrowser_frames_test.cpp)
+        target_link_libraries(signinbrowser_frames_test PRIVATE justconnect_signin_browser)
+        add_test(NAME signinbrowser_frames_test COMMAND signinbrowser_frames_test)
+        set_tests_properties(signinbrowser_frames_test PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=xcb")
+    endif()
 
     add_executable(applicationlogger_test
         tests/applicationlogger_test.cpp)

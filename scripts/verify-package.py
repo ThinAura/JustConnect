@@ -265,7 +265,7 @@ def linux_audit(files, root, arch, env):
             # helper ships this way.
             if path.relative_to(root).as_posix() != LINUX_HELPER['executable']:
                 raise RuntimeError(f'Unexpected static ELF in package: {path}')
-            evidence.append({'file': str(path.relative_to(root)), 'dependencies': {}, 'static': True})
+            evidence.append({'file': path.relative_to(root).as_posix(), 'dependencies': {}, 'static': True})
             continue
         if re.search(r'\(RPATH\)', dynamic):
             raise RuntimeError(f'Legacy DT_RPATH entry is not relocatable by the audit: {path}')
@@ -283,12 +283,12 @@ def linux_audit(files, root, arch, env):
         for name in re.findall(r'\(NEEDED\)\s+Shared library: \[(\S+)\]', dynamic):
             if name.startswith('libQt6') and name not in bundled:
                 raise RuntimeError(f'Unbundled Qt dependency: {path}: {name}')
-            dependencies[name] = (str((root / 'lib' / name).relative_to(root)) if name in bundled
+            dependencies[name] = ((root / 'lib' / name).relative_to(root).as_posix() if name in bundled
                                   else 'Linux system library')
         unresolved = [line.strip() for line in run('ldd', path, env=env).splitlines() if 'not found' in line]
         if unresolved:
             raise RuntimeError(f'Unresolved ELF dependencies: {path}: {unresolved}')
-        evidence.append({'file': str(path.relative_to(root)), 'dependencies': dependencies})
+        evidence.append({'file': path.relative_to(root).as_posix(), 'dependencies': dependencies})
     if not (root / 'bin/qt.conf').is_file():
         raise RuntimeError('Missing packaged qt.conf')
     qt_conf = (root / 'bin/qt.conf').read_text(encoding='utf-8')
@@ -346,7 +346,7 @@ def check_signin_browser(root, executable, probe, env):
         try:
             shutil.copyfile(probe, installed_probe)
             installed_probe.chmod(0o755)
-            probe_env = dict(env, QT_QPA_PLATFORM={'win32': 'windows', 'linux': 'offscreen'}.get(sys.platform, 'cocoa'))
+            probe_env = dict(env, QT_QPA_PLATFORM={'win32': 'windows', 'linux': 'xcb'}.get(sys.platform, 'cocoa'))
             if sys.platform == 'win32':
                 probe_env['QT_QPA_PLATFORM_PLUGIN_PATH'] = str(root / 'platforms')
             command = [str(installed_probe)]

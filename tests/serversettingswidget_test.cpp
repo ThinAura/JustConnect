@@ -56,12 +56,17 @@ int main(int argc,char **argv) {
     check(mode->currentIndex()==0 && mode->y()>port->y() && mode->y()<verify->y()
         && localPort->isHidden() && httpPort->isHidden() && extraRoutes->isHidden(),"mode is near the top and only local mode shows proxy fields");
     auto *routingWarning=editor.findChild<QLabel *>("routingModeWarningLabel");
-    check(routingWarning && routingWarning->isVisibleTo(&editor) && !routingWarning->text().isEmpty(),
+    check(routingWarning, "the routing notice exists");
+#if defined(Q_OS_LINUX)
+    check(routingWarning->isVisibleTo(&editor) && !routingWarning->text().isEmpty(),
         "automatic routing explains its authorization or the missing host setup");
     if (routingWarning->text().contains("not installed as a root-owned"))
         check(routingWarning->text().contains("root-owned executable")
             && routingWarning->text().contains("setup-network-helper"),
             "a missing helper names its protected location and the system installer");
+#else
+    check(routingWarning->isHidden(), "the Linux setup notice is hidden on other platforms");
+#endif
     mode->setCurrentIndex(1);
     check(routingWarning->isHidden(),"local proxy mode hides the automatic routing notice");
     localPort->setValue(32081);
@@ -70,7 +75,7 @@ int main(int argc,char **argv) {
     auto local=SavedConnectionService::load(editor.settingsValues());
     check(local.routingMode==RoutingMode::LocalProxy && local.proxy.socksBind=="127.0.0.1:32081"
         && local.proxy.httpBind=="127.0.0.1:32082",
-        "local settings share one port");
+        "local settings preserve the configured SOCKS and HTTP ports");
     check(!localPort->isHidden() && !httpPort->isHidden() && !extraRoutes->isHidden() && extraRoutes->maximumHeight()==ca->maximumHeight()
         && local.proxy.additionalClashTargets=="192.0.2.18:22","local settings expose and save extra routes with the same field style");
     check(rules->isVisibleTo(&editor) && dnsHelp && !dnsHelp->text().contains("Clash"),

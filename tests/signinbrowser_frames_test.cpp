@@ -162,8 +162,8 @@ Run runScenario(const QUrl &callback, const QUrl &start, const std::function<boo
         std::exit(1);
     }
     if (runtimeFailed) {
-        std::cerr << "SKIP: the WebKitGTK runtime is unavailable on this session\n";
-        std::exit(0);
+        std::cerr << "FAIL: the WebKitGTK runtime is unavailable on this session\n";
+        std::exit(1);
     }
     return run;
 }
@@ -171,12 +171,10 @@ Run runScenario(const QUrl &callback, const QUrl &start, const std::function<boo
 int run(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    // The view embeds through X11; without a real display server the runtime
-    // probe (signinbrowser_test) covers the boundary elsewhere.
     if (QGuiApplication::platformName() != QLatin1String("xcb")) {
-        std::cerr << "SKIP: the sign-in callback frame test needs an X11 session (Qt platform "
+        std::cerr << "FAIL: the sign-in callback frame test needs an X11 session (Qt platform "
             << qPrintable(QGuiApplication::platformName()) << ")\n";
-        return 0;
+        return 1;
     }
 
     CallbackServer server;

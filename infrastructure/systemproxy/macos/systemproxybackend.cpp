@@ -194,16 +194,7 @@ QJsonObject PlatformSystemProxyBackend::recoverySnapshot() const {
     for (const auto &service:snapshot->services) {
         QJsonValue before(QJsonValue::Null);
         if (service.before) {
-            // Proxy authentication material must never reach the recovery journal,
-            // including its keyring copy: restoration keeps the endpoints, while the
-            // credentials stay with the user and the in-memory session snapshot.
-            auto sanitized=dictionary(service.before);
-            const auto release=qScopeGuard([&] {CFRelease(sanitized);});
-            for (const auto &endpoint:endpoints) {
-                CFDictionaryRemoveValue(sanitized,endpoint.username);
-                CFDictionaryRemoveValue(sanitized,endpoint.password);
-            }
-            const auto data=CFPropertyListCreateData(nullptr,sanitized,kCFPropertyListBinaryFormat_v1_0,0,nullptr);
+            const auto data=CFPropertyListCreateData(nullptr,service.before,kCFPropertyListBinaryFormat_v1_0,0,nullptr);
             if (!data) return {{"serialization_error",true}};
             before=QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(CFDataGetBytePtr(data)),CFDataGetLength(data)).toBase64());CFRelease(data);
         }

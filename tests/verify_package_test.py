@@ -265,7 +265,7 @@ class VerifyPackageTest(unittest.TestCase):
                 self.assertEqual(Path(args[0]).read_bytes(), probe.read_bytes())
                 self.assertNotEqual(Path(kwargs['cwd']), executable.parent)
                 env = kwargs['env']
-                self.assertEqual(env['QT_QPA_PLATFORM'], 'offscreen')
+                self.assertEqual(env['QT_QPA_PLATFORM'], 'xcb')
                 self.assertNotIn('QTWEBENGINE_CHROMIUM_FLAGS', env)
                 self.assertNotIn('QT_QPA_PLATFORM_PLUGIN_PATH', env)
                 return ''

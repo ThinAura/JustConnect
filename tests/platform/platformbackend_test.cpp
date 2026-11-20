@@ -478,6 +478,9 @@ static void backendTests() {
     check(state.values["org.gnome.system.proxy/autoconfig-url"] == seeded["org.gnome.system.proxy/autoconfig-url"]
           && state.values["org.gnome.system.proxy.http/authentication-user"] == "'fixture-user'",
           "read-only keys keep their original variant values");
+    const auto record = QJsonDocument(backend.recoverySnapshot()).toJson(QJsonDocument::Compact);
+    check(!record.contains("authentication-user") && !record.contains("authentication-password"),
+          "the durable recovery record excludes GNOME proxy credentials");
     view = backend.check(config);
     check(view.result.succeeded() && view.active && view.managed && !view.conflict && view.endpoints.isEmpty(),
           "the recorded session verifies against its own config");

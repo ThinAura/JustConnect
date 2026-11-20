@@ -19,8 +19,6 @@ constexpr Key IgnoreHostsKey{"org.gnome.system.proxy", "ignore-hosts"};
 constexpr Key HttpHostKey{"org.gnome.system.proxy.http", "host"};
 constexpr Key HttpPortKey{"org.gnome.system.proxy.http", "port"};
 constexpr Key HttpAuthKey{"org.gnome.system.proxy.http", "use-authentication"};
-constexpr Key HttpUserKey{"org.gnome.system.proxy.http", "authentication-user"};
-constexpr Key HttpPasswordKey{"org.gnome.system.proxy.http", "authentication-password"};
 constexpr Key HttpsHostKey{"org.gnome.system.proxy.https", "host"};
 constexpr Key HttpsPortKey{"org.gnome.system.proxy.https", "port"};
 constexpr Key FtpHostKey{"org.gnome.system.proxy.ftp", "host"};
@@ -39,7 +37,7 @@ const std::vector<Group> groups = {
     {ModeFields, {ModeKey}},
     {AutoconfigFields, {AutoconfigKey}},
     {IgnoreFields, {IgnoreHostsKey}},
-    {HttpFields, {HttpHostKey, HttpPortKey, HttpAuthKey, HttpUserKey, HttpPasswordKey}},
+    {HttpFields, {HttpHostKey, HttpPortKey, HttpAuthKey}},
     {HttpsFields, {HttpsHostKey, HttpsPortKey}},
     {FtpFields, {FtpHostKey, FtpPortKey}},
     {SocksFields, {SocksHostKey, SocksPortKey}},
@@ -91,7 +89,7 @@ QJsonObject requested(const QJsonObject &before, const SystemProxyConfig &config
     if (bits & HttpFields) {
         installed[keyName(HttpHostKey)] = variantString(QStringLiteral("127.0.0.1"));
         installed[keyName(HttpPortKey)] = QString::number(config.httpPort);
-        // Keep old authentication material in the snapshot, never on the temporary local endpoint.
+        // Leave the saved credentials untouched and disable authentication on the local endpoint.
         installed[keyName(HttpAuthKey)] = QStringLiteral("false");
     }
     if (bits & HttpsFields) {

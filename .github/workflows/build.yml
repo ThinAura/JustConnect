@@ -68,7 +68,7 @@ jobs:
             libgl1-mesa-dev libegl-dev libxkbcommon-dev libfontconfig1-dev \
             libnss3-dev libxcomposite-dev libxcursor-dev libxi-dev libxtst-dev \
             libxrandr-dev libdrm-dev libgbm-dev libasound2-dev libatspi2.0-dev \
-            libwebkit2gtk-4.1-dev patchelf
+            libwebkit2gtk-4.1-dev xvfb xauth patchelf
 
       - name: Install Qt
         uses: ./.github/actions/setup-qt
@@ -140,7 +140,13 @@ jobs:
         run: cmake --build build --config Release --parallel 3
 
       - name: Run tests
-        run: ctest --test-dir build --build-config Release --output-on-failure
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a ctest --test-dir build --build-config Release --output-on-failure
+          else
+            ctest --test-dir build --build-config Release --output-on-failure
+          fi
         env:
           QT_QPA_PLATFORM: offscreen
 
