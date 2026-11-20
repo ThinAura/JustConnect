@@ -37,14 +37,6 @@ LinuxNetworkAccess::LinuxNetworkAccess(CoreEngine *core, NetworkPolicySession *p
         });
     connect(policy, &NetworkPolicySession::changed, this, &LinuxNetworkAccess::prepareConfiguration);
     connect(policy, &NetworkPolicySession::changed, this, &LinuxNetworkAccess::observeModel, Qt::QueuedConnection);
-    // Event-driven original-network observation: kernel link/address/route
-    // notifications plus resolver file edits request exactly one full
-    // snapshot per change; an unchanged connection requests none.
-    monitor = new LinuxNetworkMonitor(-1, this);
-    connect(monitor, &LinuxNetworkMonitor::networkChanged, this, [this, policy] {
-        if (stage == Stage::Ready || stage == Stage::Updating || (stage == Stage::Activating && helper.restorationPending()))
-            policy->requestRefresh();
-    });
     connect(&worker, &QFutureWatcher<LinuxHelperPreparation>::finished, this, [this] {
         preparing = false;
         if (stage == Stage::Stopping) { driveStop(); return; }
@@ -113,6 +105,11 @@ void LinuxNetworkAccess::activate(const QUuid &id, const ConnectionOptions &conn
     }
     mtu = core->tunnelMtu();
     stage = Stage::Activating; generation = policy->currentGeneration(); localDNS = connectionOptions.dns.localDnsServer;
+    monitor = std::make_unique<LinuxNetworkMonitor>(-1);
+    connect(monitor.get(), &LinuxNetworkMonitor::networkChanged, this, [this] {
+        if (stage == Stage::Ready || stage == Stage::Updating || helper.restorationPending())
+            policy->requestRefresh();
+    });
     prepareConfiguration();
 }
 
@@ -233,6 +230,7 @@ void LinuxNetworkAccess::stop(const QUuid &id)
 {
     if (id != attempt) { emit stopped(id, {Status::Failed, QStringLiteral("Recovery request does not belong to the current connection."), true}); return; }
     if (stage == Stage::Stopping) return;
+    monitor.reset();
     stage = Stage::Stopping; driveStop();
 }
 

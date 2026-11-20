@@ -33,7 +33,7 @@ private:
     int mtu = 0;
     LinuxNetworkHelperClient helper;
     QFutureWatcher<LinuxHelperPreparation> worker;
-    LinuxNetworkMonitor *monitor = nullptr;
+    std::unique_ptr<LinuxNetworkMonitor> monitor;
     std::unique_ptr<QLockFile> lock;
     QUuid attempt;
     QString generation, localDNS;
