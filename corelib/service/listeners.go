@@ -159,8 +159,10 @@ func StartLocal(ctx context.Context, socks, http net.Listener, dialer *dial.Dial
 
 func startListeners(ctx context.Context, socksAddr, httpAddr string, socksListener, httpListener net.Listener, dialer *dial.Dialer, resolver *resolve.Resolver, diagnostic func(string)) (*Listeners, error) {
 	if err := ctx.Err(); err != nil {
-		if socksListener != nil {
-			_ = socksListener.Close()
+		for _, listener := range []net.Listener{socksListener, httpListener} {
+			if listener != nil {
+				_ = listener.Close()
+			}
 		}
 		return nil, err
 	}

@@ -19,6 +19,31 @@ import (
 	"github.com/wtalioy/JustConnect/corelib/resolve"
 )
 
+func TestStartLocalClosesBothReservedSocketsOnCancellation(t *testing.T) {
+	socks, err := ListenLoopback(t.Context(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socks.Close()
+	httpListener, err := ListenLoopback(t.Context(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer httpListener.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if listeners, err := StartLocal(ctx, socks, httpListener, nil, nil); listeners != nil || err != context.Canceled {
+		t.Fatalf("StartLocal after cancellation: %v, %v", listeners, err)
+	}
+	for _, listener := range []net.Listener{socks, httpListener} {
+		rebound, err := ListenLoopback(t.Context(), listener.Addr().String())
+		if err != nil {
+			t.Fatalf("reserved listener survived cancellation: %v", err)
+		}
+		rebound.Close()
+	}
+}
+
 // localProxyFixture mirrors the session's local-proxy construction: a strict
 // user dialer (alwaysUseVPN, like dial.NewDialer(..., options.LocalProxy)) on
 // top of a tunnel stack that reaches campus origins, fronted by StartLocal's
