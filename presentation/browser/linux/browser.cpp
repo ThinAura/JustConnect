@@ -103,10 +103,7 @@ struct SignInBrowser::Native {
     QUrl current, pending, topLoad;
     QString html;
     bool ready = false, failed = false, htmlPending = false, embedded = false, tlsExceptionRetried = false;
-    // WebKitGTK still emits WEBKIT_LOAD_FINISHED after a failed provisional
-    // load, so the finished event cannot by itself distinguish success from a
-    // failure that has already been reported through loadFinished(false).
-    bool loadErrored = false;
+    bool loadCommitted = false;
 };
 
 namespace {
@@ -422,7 +419,7 @@ void onLoadChanged(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
         // The explicit load() target has been consumed; later navigation
         // decisions classify through their own signals.
         native->topLoad.clear();
-        native->loadErrored = false;
+        native->loadCommitted = false;
         emit self->loadStarted();
         break;
     }
@@ -430,14 +427,13 @@ void onLoadChanged(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
         const QUrl target(uriToUrl(webkit_web_view_get_uri(view)));
         native->current = target;
         native->tlsExceptionRetried = false;
-        native->loadErrored = false;
+        native->loadCommitted = true;
         emit self->urlChanged(target);
         break;
     }
     case WEBKIT_LOAD_FINISHED:
-        // A failed load reaches this event too; the failure was already
-        // reported through loadFinished(false) and must not be overwritten.
-        if (!native->loadErrored) emit self->loadFinished(true);
+        // WebKit also finishes ignored and failed provisional navigations.
+        if (std::exchange(native->loadCommitted, false)) emit self->loadFinished(true);
         break;
     default:
         break;
@@ -448,12 +444,12 @@ gboolean onLoadFailed(WebKitWebView *, WebKitLoadEvent, const gchar *failingUri,
 {
     auto *self = static_cast<SignInBrowser *>(data);
     if (!self) return FALSE;
-    // Cancellations and policy interruptions are decisions, not failed loads.
+    SignInBrowser::nativeOf(self)->loadCommitted = false;
+    // Policy interruptions and superseded navigations already have a decision.
     if (error && (g_error_matches(error, webkit_network_error_quark(), WEBKIT_NETWORK_ERROR_CANCELLED)
-        || error->domain == webkit_policy_error_quark())) return FALSE;
-    SignInBrowser::nativeOf(self)->loadErrored = true;
+        || error->domain == webkit_policy_error_quark())) return TRUE;
     emit self->loadFinished(false);
-    return FALSE;
+    return TRUE;
 }
 
 gboolean onLoadFailedWithTlsErrors(WebKitWebView *view, const gchar *failing_uri,
@@ -472,27 +468,19 @@ gboolean onLoadFailedWithTlsErrors(WebKitWebView *view, const gchar *failing_uri
     // keeps the origin so failures stay diagnosable without leaking them.
     qCDebug(browserLog) << "certificate error" << target.scheme() + "://" + target.host()
         + ":" + QString::number(target.port(target.scheme() == "https" ? 443 : 80)) << okay;
-    if (!okay) {
+    native->loadCommitted = false;
+    if (!okay || native->tlsExceptionRetried) {
         emit self->certificateRejected();
-        return FALSE; // load-failed follows and reports the failed load.
+        emit self->loadFinished(false);
+        return TRUE;
     }
     // The exception is scoped to this host: nothing on other ports or schemes
     // can reuse it, because the scope rules block the request before TLS.
     webkit_web_context_allow_tls_certificate_for_host(native->context, certificate,
         target.host().toUtf8().constData());
-    // Returning TRUE suppresses load-failed for this load, so mark it errored
-    // or its trailing WEBKIT_LOAD_FINISHED would report a success for a page
-    // that was never committed. The reload below starts fresh.
-    native->loadErrored = true;
-    if (!native->tlsExceptionRetried) {
-        // The current load completes as failed; a reload proceeds with the granted exception.
-        native->tlsExceptionRetried = true;
-        // webkit_web_view_reload() only re-drives a committed load: a failed
-        // provisional load (the common TLS-error case) leaves the view with no
-        // current URI and the reload finishes as an empty page. Load the failed
-        // URI explicitly instead.
-        webkit_web_view_load_uri(view, failing_uri);
-    }
+    // Reload would reuse the last committed document, not the failed URL.
+    native->tlsExceptionRetried = true;
+    webkit_web_view_load_uri(view, failing_uri);
     return TRUE;
 }
 
@@ -628,6 +616,7 @@ void SignInBrowser::load(const QUrl &target)
 {
     qCDebug(browserLog) << "load requested" << target.isEmpty();
     native->pending = target; native->htmlPending = false;
+    native->tlsExceptionRetried = false;
     // An explicit load always targets the main frame; record it so the policy
     // decision recognizes the main-frame load that WebKitGTK cannot label.
     native->topLoad = target;
