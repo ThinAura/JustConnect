@@ -842,6 +842,9 @@ func TestCampusDNSFailuresEmitRateLimitedDiagnostics(t *testing.T) {
 	r := NewResolver(tunnel, "192.0.2.53", "", 60, nil, nil, true)
 	defer r.Close()
 	r.Diagnostic = record
+	r.secondaryResolver = &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("ordinary resolver unavailable in this scenario")
+	}}
 	if _, _, err := r.Resolve(t.Context(), "www.public.test"); err == nil {
 		t.Fatal("resolution succeeded against a failing campus transport")
 	}
